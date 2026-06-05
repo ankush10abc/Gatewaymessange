@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "335214113602",
+    "firebase_url": "https://reportgateway-28186-default-rtdb.firebaseio.com",
+    "project_id": "reportgateway-28186",
+    "storage_bucket": "reportgateway-28186.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:335214113602:android:d4ef30b1fa628b93228edb",
+        "android_client_info": {
+          "package_name": "com.company.gateway"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA2qeQyT5BTYvFOt3ruL-ufeK1dkL_NGvQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,0 +1,13 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.company.gateway",
+      "sha256_cert_fingerprints": [
+        "6C:7B:76:CC:29:E9:CB:19:79:FA:CA:73:79:35:91:EE:57:94:06:18:F7:1A:B4:74:1A:F8:80:58:1C:E8:79:E6",
+        "REPLACE_WITH_PLAY_STORE_APP_SIGNING_SHA256"
+      ]
+    }
+  }
+]
