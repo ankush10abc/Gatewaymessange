@@ -11,6 +11,7 @@ import 'app/routes/app_router.dart';
 import 'core/services/api_service_simple.dart';
 import 'core/services/deep_link_service.dart';
 import 'core/services/hive_init_service.dart';
+import 'core/services/image_cache_service.dart';
 import 'core/services/notification_handler.dart';
 import 'core/services/offline_queue_service.dart';
 import 'core/services/sync_service.dart';
@@ -52,6 +53,9 @@ void main() async {
 
     // Initialize Hive for offline mode
     await HiveInitService.initialize();
+
+    // Initialize image cache
+    await ImageCacheService().initialize();
 
     // Initialize offline queue service
     final dio = Dio();
@@ -122,17 +126,23 @@ class _MyAppState extends ConsumerState<MyApp> {
   }
 
   void _handleDeepLink(Uri uri) {
-    // Matches https://gatewayreports.in/send/app?message=...
+    String? message;
+    
+    // HTTPS: https://gatewayreports.in/send/app?message=...
     if (uri.host == 'gatewayreports.in' && uri.path.startsWith('/send/app')) {
-      final message = uri.queryParameters['message'];
-      if (message != null && message.isNotEmpty) {
-        DeepLinkService.setPendingMessage(message);
-        // Navigate after the widget tree is ready
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          final router = ref.read(routerProvider);
-          router.go('/chat-selection?message=${Uri.encodeComponent(message)}');
-        });
-      }
+      message = uri.queryParameters['message'];
+    }
+    // Custom scheme for Firefox: gateway://send?message=...
+    else if (uri.scheme == 'gateway') {
+      message = uri.queryParameters['message'];
+    }
+    
+    if (message != null && message.isNotEmpty) {
+      DeepLinkService.setPendingMessage(message);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final router = ref.read(routerProvider);
+        router.go('/chat-selection?message=${Uri.encodeComponent(message!)}');
+      });
     }
   }
 

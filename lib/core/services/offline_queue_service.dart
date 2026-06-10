@@ -188,49 +188,129 @@ class OfflineQueueService {
   static Future<void> _sendBatch(List<PendingMessage> messages) async {
     if (_apiService == null || _queueBox == null) return;
 
-    final batchData = messages.map((m) => {
-      'temp_id': m.tempId,
-      'chat_id': m.chatId,
-      'chat_type': m.chatType,
-      'message': m.message,
-      'type': m.type,
-      'firebase_key': m.firebaseKey,
-      'client_timestamp': m.clientTimestamp.toIso8601String(),
-      if (m.filePath != null) 'file_path': m.filePath,
-      if (m.fileName != null) 'file_name': m.fileName,
-      if (m.fileSize != null) 'file_size': m.fileSize,
-      if (m.replyToMessageId != null) 'reply_to_message_id': m.replyToMessageId,
+    // Format messages to match exact API spec - with support for replies
+    // Format: {"temp_id", "chat_id", "chat_type", "type", "message", "firebase_key", "reply_to_message_id"?}
+    final batchData = messages.map((m) {
+      final msgData = <String, dynamic>{
+        'temp_id': m.tempId,
+        'chat_id': int.tryParse(m.chatId) ?? 0, // Must be integer
+        'chat_type': m.chatType, // 'group' or 'user'
+        'type': m.type, // 'text', 'image', 'video', 'pdf', 'doc'
+        'message': m.message,
+        'firebase_key': m.firebaseKey,
+      };
+      
+      // Add reply_to_message_id if present (IMPORTANT: must be integer)
+      if (m.replyToMessageId != null && m.replyToMessageId!.isNotEmpty) {
+        msgData['reply_to_message_id'] = int.tryParse(m.replyToMessageId!) ?? 0;
+      }
+      
+      // Add other optional fields only if not null
+      if (m.clientTimestamp != null) {
+        msgData['client_timestamp'] = m.clientTimestamp.toIso8601String();
+      }
+      if (m.filePath != null) msgData['file_path'] = m.filePath;
+      if (m.fileName != null) msgData['file_name'] = m.fileName;
+      if (m.fileSize != null) msgData['file_size'] = m.fileSize;
+      
+      return msgData;
     }).toList();
 
     try {
+      final replyCount = batchData.where((m) => m.containsKey('reply_to_message_id')).length;
+      debugPrint('🚀 Sending batch: ${messages.length} messages (${replyCount} replies)');
+      
+      // Log samples
+      if (batchData.isNotEmpty) {
+        final sample = batchData.first;
+        final hasReply = sample.containsKey('reply_to_message_id');
+        debugPrint('📦 Sample: ${sample['temp_id']} ${hasReply ? '↩️ reply to: ${sample['reply_to_message_id']}' : '(original)'}');
+      }
+      
       final response = await _apiService!.batchSendMessages(batchData);
-      final sent = response['data']['sent'] as List? ?? [];
-      final failed = response['data']['failed'] as List? ?? [];
+      
+      // Validate response structure
+      if (response['success'] != true) {
+        throw Exception('Batch send failed: ${response['message'] ?? 'Unknown error'}');
+      }
+      
+      final data = response['data'];
+      final sent = data['sent'] as List? ?? [];
+      final failed = data['failed'] as List? ?? [];
+      final totalSent = data['total_sent'] ?? sent.length;
+      final totalFailed = data['total_failed'] ?? failed.length;
 
+      debugPrint('📋 Batch result:');
+      debugPrint('   ✅ Sent: $totalSent');
+      debugPrint('   ❌ Failed: $totalFailed');
+
+      // Process successfully sent messages - remove from queue
       for (final item in sent) {
         final tempId = item['temp_id'];
+        final serverId = item['id'] ?? item['msgId'];
+        
+        // Check if it was a reply message
+        final originalMsg = batchData.firstWhere(
+          (m) => m['temp_id'] == tempId,
+          orElse: () => {},
+        );
+        final wasReply = originalMsg.containsKey('reply_to_message_id');
+        
         await _queueBox!.delete(tempId);
-        debugPrint('✅ Sent: $tempId');
+        debugPrint('   ✓ $tempId → $serverId ${wasReply ? '↩️' : ''}');
       }
 
+      // Process failed messages - increment retry count
       for (final item in failed) {
         final tempId = item['temp_id'];
-        final message = messages.firstWhere((m) => m.tempId == tempId);
-        final updated = message.copyWith(
-          status: 'failed',
-          retryCount: message.retryCount + 1,
+        final errorMsg = item['error'] ?? 'Unknown error';
+        final errorCode = item['error_code'] ?? 'UNKNOWN';
+        
+        // Find the message in our batch
+        final message = messages.firstWhere(
+          (m) => m.tempId == tempId, 
+          orElse: () => messages.first,
         );
-        await _queueBox!.put(tempId, updated.toJson());
-        debugPrint('❌ Failed: $tempId - ${item['error']}');
+        
+        // Update with incremented retry count
+        final newRetryCount = message.retryCount + 1;
+        
+        if (newRetryCount >= maxRetries) {
+          debugPrint('   ❌ $tempId: max retries ($maxRetries) - $errorCode');
+          final updated = message.copyWith(
+            status: 'failed_permanent',
+            retryCount: newRetryCount,
+          );
+          await _queueBox!.put(tempId, updated.toJson());
+        } else {
+          debugPrint('   ↻ $tempId: retry ${newRetryCount}/$maxRetries - $errorCode');
+          final updated = message.copyWith(
+            status: 'failed',
+            retryCount: newRetryCount,
+          );
+          await _queueBox!.put(tempId, updated.toJson());
+        }
       }
+      
+      debugPrint('🏁 Complete: ${sent.length} cleared, ${failed.length} retrying');
+      
     } catch (e) {
-      debugPrint('❌ Batch send error: $e');
+      debugPrint('❌ Batch send exception: $e');
+      debugPrint('↻ Marking ${messages.length} messages for retry');
+      
+      // On network/server error, increment retry count for all messages
       for (final message in messages) {
-        final updated = message.copyWith(
-          status: 'failed',
-          retryCount: message.retryCount + 1,
-        );
-        await _queueBox!.put(message.tempId, updated.toJson());
+        final newRetryCount = message.retryCount + 1;
+        
+        if (newRetryCount < maxRetries) {
+          final updated = message.copyWith(
+            status: 'failed',
+            retryCount: newRetryCount,
+          );
+          await _queueBox!.put(message.tempId, updated.toJson());
+        } else {
+          debugPrint('   ❌ ${message.tempId}: max retries');
+        }
       }
     }
   }

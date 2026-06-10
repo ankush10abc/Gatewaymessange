@@ -81,12 +81,15 @@ class GoRouterNotifier extends StateNotifier<GoRouter> {
             final type = state.uri.queryParameters['type'] ?? 'user';
             final name = state.uri.queryParameters['name'] ?? 'Chat';
             final message = state.uri.queryParameters['message'];
+            bool attendance_group =
+                state.uri.queryParameters['attendance_group'] == 'true';
 
             return ChatScreen(
               chatId: chatId,
               chatType: type,
               chatName: name,
               initialMessage: message,
+              attendance_group: attendance_group,
             );
           },
         ),

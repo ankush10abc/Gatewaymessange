@@ -287,4 +287,8 @@ class ApiService {
   Future<void> deleteGroupFromFirebase(Map<String, dynamic> data) async {
     await _dio.post('/firebase/delete-group', data: data);
   }
+
+  Future<Object?> batchSendMessages(List<Map<String, String>> testMessages) async {
+
+  }
 }

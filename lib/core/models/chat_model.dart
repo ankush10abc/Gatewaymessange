@@ -9,6 +9,7 @@ class Chat {
   final Message? lastMessage;
   final DateTime createdAt;
   final DateTime updatedAt;
+  final DateTime? lastMessageTime;
   final bool isPinned;
   final Map<String, int> unreadCount;
   final String? groupName;
@@ -18,6 +19,7 @@ class Chat {
   final bool? attendance_group;
   final dynamic? unread_count;
   final dynamic? actual_role;
+
   final Map<String, String>? groupRoles;
 
   Chat({
@@ -27,6 +29,7 @@ class Chat {
     this.lastMessage,
     required this.createdAt,
     required this.updatedAt,
+    this.lastMessageTime,
     this.isPinned = false,
     required this.unreadCount,
     this.groupName,
@@ -40,10 +43,30 @@ class Chat {
   });
 
   factory Chat.fromJson(Map<String, dynamic> json) {
+    DateTime? parsedLastMessageTime;
+    try {
+      if (json['last_message_time'] != null) {
+        parsedLastMessageTime = DateTime.parse(json['last_message_time']);
+      } else if (json['sort_time'] != null) {
+        parsedLastMessageTime = DateTime.parse(json['sort_time']);
+      } else if (json['last_message'] != null) {
+        final lastMsg = json['last_message'];
+        if (lastMsg['timestamp'] != null) {
+          parsedLastMessageTime = DateTime.parse(lastMsg['timestamp']);
+        } else if (lastMsg['created_at'] != null) {
+          parsedLastMessageTime = DateTime.parse(lastMsg['created_at']);
+        }
+      }
+    } catch (e) {
+      // Error parsing - use fallback
+    }
+
     return Chat(
       id: json['id']?.toString() ?? '',
       type: json['type'] ?? 'private',
-      participants: List<String>.from(json['participants'] ?? []),
+      participants: json['participants'] != null 
+          ? List<String>.from(json['participants'])
+          : (json['type'] == 'user' ? [json['id']?.toString() ?? ''] : []),
       lastMessage: json['last_message'] != null 
           ? Message.fromJson(json['last_message'])
           : null,
@@ -53,22 +76,22 @@ class Chat {
       updatedAt: json['updated_at'] != null 
           ? DateTime.parse(json['updated_at'])
           : DateTime.now(),
+      lastMessageTime: parsedLastMessageTime,
       isPinned: json['is_pinned'] ?? false,
-      unreadCount: Map<String, int>.from(json['unread_count'] ?? {}),
-      groupName: json['group_name'],
+      unreadCount: Map<String, int>.from(json['unread_count'] is Map ? json['unread_count'] : {}),
+      groupName: json['name'] ?? json['group_name'],
       groupDescription: json['group_description'],
       groupImage: json['group_image'],
       profile_picture: json['profile_picture'],
       attendance_group: json['attendance_group'],
       unread_count: json['unread_count'],
-      actual_role: json['actual_role'],
+      actual_role: json['actual_role'] ?? json['role'],
       groupRoles: json['group_roles'] != null
           ? Map<String, String>.from(json['group_roles'])
           : null,
     );
   }
 
-  // Firebase Firestore conversion
   factory Chat.fromFirestore(Map<String, dynamic> data, String id) {
     return Chat(
       id: id,
@@ -79,6 +102,7 @@ class Chat {
           : null,
       createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       updatedAt: (data['updatedAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
+      lastMessageTime: (data['lastMessageTime'] as Timestamp?)?.toDate(),
       isPinned: data['isPinned'] ?? false,
       unreadCount: Map<String, int>.from(data['unreadCount'] ?? {}),
       groupName: data['groupName'],
@@ -98,6 +122,7 @@ class Chat {
       'lastMessage': lastMessage?.toFirestore(),
       'createdAt': Timestamp.fromDate(createdAt),
       'updatedAt': Timestamp.fromDate(updatedAt),
+      'lastMessageTime': lastMessageTime != null ? Timestamp.fromDate(lastMessageTime!) : null,
       'isPinned': isPinned,
       'unreadCount': unreadCount,
       'groupName': groupName,
@@ -116,6 +141,7 @@ class Chat {
       'last_message': lastMessage?.toJson(),
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
+      'last_message_time': lastMessageTime?.toIso8601String(),
       'is_pinned': isPinned,
       'unread_count': unreadCount,
       'actual_role': actual_role,
@@ -131,12 +157,15 @@ class Chat {
   bool get isGroup => type == 'group';
   bool get isPrivate => type == 'private';
 
+  DateTime getLastMessageTime() {
+    return lastMessageTime ?? lastMessage?.timestamp ?? updatedAt;
+  }
+
   String getDisplayName(String currentUserId, List<User> users) {
     if (isGroup) {
       return groupName ?? 'Group Chat';
     }
     
-    // For user chats, if groupName is set, use it (from API response)
     if (groupName != null && groupName!.isNotEmpty) {
       return groupName!;
     }
@@ -165,7 +194,6 @@ class Chat {
       return groupImage ?? profile_picture;
     }
     
-    // For user chats, use profile_picture from API if available
     if (profile_picture != null && profile_picture!.isNotEmpty) {
       return profile_picture;
     }
@@ -190,7 +218,6 @@ class Chat {
   }
 
   int getUnreadCountForUser(String userId) {
-    // First try to get from API unread_count field
     if (unread_count != null) {
       if (unread_count is int) {
         return unread_count as int;
@@ -199,7 +226,6 @@ class Chat {
         return countMap[userId] ?? 0;
       }
     }
-    // Fallback to original unreadCount map
     return unreadCount[userId] ?? 0;
   }
 
@@ -214,6 +240,7 @@ class Chat {
     Message? lastMessage,
     DateTime? createdAt,
     DateTime? updatedAt,
+    DateTime? lastMessageTime,
     bool? isPinned,
     Map<String, int>? unreadCount,
     String? groupName,
@@ -221,17 +248,18 @@ class Chat {
     String? groupImage,
     String? profile_picture,
     bool? attendance_group,
-    String? unread_count,
-    String? actual_role,
+    dynamic? unread_count,
+    dynamic? actual_role,
     Map<String, String>? groupRoles,
   }) {
     return Chat(
       id: id ?? this.id,
       type: type ?? this.type,
       participants: participants ?? this.participants,
-      lastMessage: lastMessage ?? this.lastMessage,
+      lastMessage: lastMessage,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      lastMessageTime: lastMessageTime ?? this.lastMessageTime,
       isPinned: isPinned ?? this.isPinned,
       unreadCount: unreadCount ?? this.unreadCount,
       groupName: groupName ?? this.groupName,

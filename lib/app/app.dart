@@ -1,18 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
-import '../core/services/api_service_simple.dart';
 import '../core/services/notification_handler.dart';
 import 'routes/app_router.dart';
 import 'theme/app_theme.dart';
 import '../core/providers/storage_provider.dart';
-import '../shared/providers/auth_provider.dart';
+
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+
 class GatewayMessengerApp extends ConsumerStatefulWidget {
-   GatewayMessengerApp({super.key});
+  const GatewayMessengerApp({super.key});
 
   @override
-  _GatewayMessengerAppState createState() => _GatewayMessengerAppState();
+  ConsumerState<GatewayMessengerApp> createState() => _GatewayMessengerAppState();
 }
 
 class _GatewayMessengerAppState extends ConsumerState<GatewayMessengerApp> {

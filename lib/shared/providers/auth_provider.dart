@@ -152,7 +152,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
   }
 
   Future<bool> login(String mobile, String password) async {
-    state = state.copyWith(isLoading: true);
+    state = state.copyWith(isLoading: true, error: null);
 
     try {
       // Get FCM token
@@ -177,6 +177,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
         user: response.user,
         isAuthenticated: true,
         isLoading: false,
+        error: null,
       );
 
       // Set user online in Firebase and API
@@ -188,9 +189,20 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
       return true;
     } catch (e) {
+      debugPrint('Login error in auth provider: $e');
+      
       String errorMessage = 'Login failed';
-      state = state.copyWith(isLoading: false);
-      if (e is DioException) {
+      
+      // Handle Exception thrown from API service
+      if (e is Exception) {
+        final exceptionMsg = e.toString();
+        // Remove "Exception: " prefix if present
+        if (exceptionMsg.startsWith('Exception: ')) {
+          errorMessage = exceptionMsg.substring(11);
+        } else {
+          errorMessage = exceptionMsg;
+        }
+      } else if (e is DioException) {
         if (e.response?.statusCode == 422) {
           // Handle validation errors
           final data = e.response?.data;

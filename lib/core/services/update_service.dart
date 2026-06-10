@@ -60,14 +60,18 @@ class UpdateService {
     try {
       _packageInfo ??= await PackageInfo.fromPlatform();
       final currentVersion = _packageInfo!.version;
-      final platform = Platform.isAndroid ? 'android' : 'ios';
 
       debugPrint('📱 Checking for updates - Current version: $currentVersion');
 
       final response = await _apiService.checkAppVersion(
         currentVersion: currentVersion,
-        platform: platform,
       );
+
+      // Validate response structure
+      if (response['success'] != true) {
+        debugPrint('⚠️ Update check response not successful');
+        return null;
+      }
 
       final updateInfo = UpdateInfo.fromJson(response);
       

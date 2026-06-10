@@ -44,12 +44,17 @@ class SyncService {
         limit: 100,
       );
 
+      // Validate response structure
+      if (response['success'] != true) {
+        throw Exception('Sync failed: ${response['message']}');
+      }
+
       final data = response['data'];
-      final newMessages = (data['messages'] as List)
+      final newMessages = (data['messages'] as List? ?? [])
           .map((json) => Message.fromJson(json))
           .toList();
       final deletedIds = List<String>.from(data['deleted_message_ids'] ?? []);
-      final updatedMessages = (data['updated_messages'] as List)
+      final updatedMessages = (data['updated_messages'] as List? ?? [])
           .map((json) => Message.fromJson(json))
           .toList();
 
@@ -93,55 +98,65 @@ class SyncService {
   /// Sync chat list
   Future<List<ChatModel>> syncChatList() async {
     try {
-      final lastSync = _syncMetaBox.get('last_chat_list_sync');
-      final since = lastSync != null ? DateTime.parse(lastSync) : null;
-
-      debugPrint('🔄 Syncing chat list ${since != null ? 'since ${since.toIso8601String()}' : '(full sync)'}');
-
-      final response = await _apiService.syncChats(since: since);
-      final data = response['data'];
-
-      final newChats = (data['new_chats'] as List)
-          .map((json) => ChatModel.fromJson(json))
-          .toList();
-      final updatedChats = (data['updated_chats'] as List)
-          .map((json) => ChatModel.fromJson(json))
-          .toList();
-      final deletedIds = List<String>.from(data['deleted_chat_ids'] ?? []);
-
-      // Get cached chat list
-      final cachedChats = await getCachedChatList();
-
-      // Remove deleted chats
-      cachedChats.removeWhere((c) => deletedIds.contains(c.id.toString()));
-
-      // Update existing chats
-      for (final updated in updatedChats) {
-        final index = cachedChats.indexWhere((c) => c.id == updated.id);
-        if (index != -1) {
-          cachedChats[index] = updated;
-        }
-      }
-
-      // Add new chats
-      cachedChats.addAll(newChats);
-
-      // Sort by last message time
-      cachedChats.sort((a, b) {
-        final aTime = a.lastMessageTime ?? DateTime(2000);
-        final bTime = b.lastMessageTime ?? DateTime(2000);
-        return bTime.compareTo(aTime);
-      });
-
-      // Save to cache
-      await _saveCachedChatList(cachedChats);
-
-      // Update last sync time
-      await _syncMetaBox.put('last_chat_list_sync', data['synced_at']);
-
-      debugPrint('✅ Synced ${newChats.length} new, ${updatedChats.length} updated, ${deletedIds.length} deleted chats');
-
-      return cachedChats;
+      // TODO: Chat sync commented to prevent 401 errors - enable after proper auth flow
+      // final lastSync = _syncMetaBox.get('last_chat_list_sync');
+      // final since = lastSync != null ? DateTime.parse(lastSync) : null;
+      // 
+      // debugPrint('🔄 Syncing chat list ${since != null ? 'since ${since.toIso8601String()}' : '(full sync)'}');
+      // 
+      // final response = await _apiService.syncChats(since: since);
+      // 
+      // // Validate response structure
+      // if (response['success'] != true) {
+      //   throw Exception('Chat sync failed: ${response['message']}');
+      // }
+      // 
+      // final data = response['data'];
+      // 
+      // final newChats = (data['new_chats'] as List? ?? [])
+      //     .map((json) => ChatModel.fromJson(json))
+      //     .toList();
+      // final updatedChats = (data['updated_chats'] as List? ?? [])
+      //     .map((json) => ChatModel.fromJson(json))
+      //     .toList();
+      // final deletedIds = List<String>.from(data['deleted_chat_ids'] ?? []);
+      // 
+      // // Get cached chat list
+      // final cachedChats = await getCachedChatList();
+      // 
+      // // Remove deleted chats
+      // cachedChats.removeWhere((c) => deletedIds.contains(c.id.toString()));
+      // 
+      // // Update existing chats
+      // for (final updated in updatedChats) {
+      //   final index = cachedChats.indexWhere((c) => c.id == updated.id);
+      //   if (index != -1) {
+      //     cachedChats[index] = updated;
+      //   }
+      // }
+      // 
+      // // Add new chats
+      // cachedChats.addAll(newChats);
+      // 
+      // // Sort by last message time
+      // cachedChats.sort((a, b) {
+      //   final aTime = a.lastMessageTime ?? DateTime(2000);
+      //   final bTime = b.lastMessageTime ?? DateTime(2000);
+      //   return bTime.compareTo(aTime);
+      // });
+      // 
+      // // Save to cache
+      // await _saveCachedChatList(cachedChats);
+      // 
+      // // Update last sync time
+      // await _syncMetaBox.put('last_chat_list_sync', data['synced_at']);
+      // 
+      // debugPrint('✅ Synced ${newChats.length} new, ${updatedChats.length} updated, ${deletedIds.length} deleted chats');
+      // 
+      // return cachedChats;
+      
+      // Return cached list only
+      return await getCachedChatList();
     } catch (e) {
       debugPrint('❌ Chat list sync error: $e');
       // Return cached list on error
@@ -189,12 +204,22 @@ class SyncService {
   }) async {
     try {
       debugPrint('📖 Marking ${messageIds.length} messages as read');
-      await _apiService.batchMarkAsRead(
+      final response = await _apiService.batchMarkAsRead(
         messageIds: messageIds,
         chatId: chatId,
         chatType: chatType,
       );
-      debugPrint('✅ Messages marked as read');
+      
+      // Validate response
+      if (response['success'] != true) {
+        throw Exception('Batch mark as read failed: ${response['message']}');
+      }
+      
+      final data = response['data'];
+      final markedCount = data['marked_count'] ?? 0;
+      final failedIds = data['failed_ids'] as List? ?? [];
+      
+      debugPrint('✅ Marked $markedCount as read, ${failedIds.length} failed');
     } catch (e) {
       debugPrint('❌ Batch mark as read error: $e');
       rethrow;
@@ -214,8 +239,9 @@ class SyncService {
     await _syncMetaBox.clear();
     await _messagesBox.clear();
     await _chatsBox.clear();
-    await syncChatList();
-    debugPrint('✅ Full resync complete');
+    // TODO: Re-enable after auth flow is stable
+    // await syncChatList();
+    debugPrint('✅ Full resync complete (cache cleared)');
   }
 
   /// Clear all cached data

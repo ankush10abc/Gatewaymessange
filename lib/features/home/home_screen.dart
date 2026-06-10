@@ -4,36 +4,32 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:intl/intl.dart';
 import '../../core/permissions/notification_permission_helper.dart';
-import '../../core/services/api_service_simple.dart';
-import '../../core/services/deep_link_service.dart';
-import '../../core/services/offline_queue_service.dart';
-import '../../core/services/sync_service.dart';
+import '../../core/services/chat_list_update_service.dart';
 import '../../core/utils/internet_checker.dart';
 import '../../shared/providers/auth_provider.dart';
-import '../../shared/providers/chat_provider.dart';
-import '../../shared/widgets/chat_tile.dart';
+import '../../shared/providers/optimized_chat_provider.dart';
 import '../../shared/widgets/pull_to_refresh.dart';
 import '../../shared/widgets/warning_slider.dart';
-import '../../core/models/chat_model.dart';
-import '../../core/storage/storage_service.dart';
-import 'package:dio/dio.dart';
+import '../../shared/widgets/cached_profile_image.dart';
+import '../../core/services/deep_link_service.dart';
+import '../../core/services/offline_queue_service.dart';
+import '../../core/services/firebase_message_listener.dart';
+import '../../core/services/chat_list_manager.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
   @override
-  _HomeScreenState createState() => _HomeScreenState();
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   final TextEditingController _searchController = TextEditingController();
-  final StorageService _storage = StorageService();
   bool _isSearching = false;
-  late final SyncService _syncService;
 
   void initDeepLinks() {
-
     final appLinks = AppLinks();
 
     appLinks.uriLinkStream.listen((uri) {
@@ -46,7 +42,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       }
     });
 
-    // Handle initial link when app is opened from deep link
     appLinks.getInitialLink().then((uri) {
       if (uri != null) {
         debugPrint('Initial deep link: $uri');
@@ -60,80 +55,62 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     });
   }
 
-   initUI() async {
-     await InternetChecker.checkAndRedirect(context);
-     initDeepLinks();
+  initUI() async {
+    await InternetChecker.checkAndRedirect(context);
+    initDeepLinks();
     _checkPendingDeepLink();
-     try {
-       NotificationPermissionHelper.request();
-     } catch (e) {
-       print(e);
-     }
+    try {
+      NotificationPermissionHelper.request();
+    } catch (e) {
+      debugPrint('Error: $e');
+    }
   }
+
   @override
   void initState() {
     super.initState();
     
-    // Initialize sync service
-    final dio = Dio();
-    final apiService = ApiService(dio);
-    _syncService = SyncService(apiService);
-    
-    // Load chat list when screen initializes
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ApiService.setContext(context);
-      _loadChatListOfflineFirst();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final user = ref.read(authProvider).user;
+      if (user != null) {
+        ChatListUpdateService.initialize(ref, userId: user.id);
+        await ChatListManager.init(user.id);
+        await ref.read(optimizedChatProvider.notifier).initialize(userId: user.id);
+      }
+      FirebaseMessageListener.init(ref);
       initUI();
     });
     
-    // Listen for foreground notifications
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-      debugPrint('Received foreground notification: ${message.data}');
-      _loadChatListOfflineFirst();
+      debugPrint('📥 Received foreground notification: ${message.data}');
+      _handleIncomingMessage(message.data);
     });
     
-    // Listen for notification taps when app is in background
     FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
-      debugPrint('Notification opened app: ${message.data}');
-      _loadChatListOfflineFirst();
+      debugPrint('🔔 Notification opened app: ${message.data}');
+      _handleIncomingMessage(message.data);
     });
   }
 
-  void _refreshChatList() {
-    if (mounted) {
-      _loadChatListOfflineFirst();
+  void _handleIncomingMessage(Map<String, dynamic> data) {
+    try {
+      final chatId = data['chat_id']?.toString() ?? data['group_id']?.toString();
+      final chatType = data['chat_type']?.toString() ?? (data['group_id'] != null ? 'group' : 'user');
+      final messageText = data['message']?.toString() ?? data['body']?.toString() ?? 'New message';
+      
+      if (chatId != null) {
+        ref.read(optimizedChatProvider.notifier).updateChatWithMessage(
+          chatId: chatId,
+          chatType: chatType,
+          lastMessage: messageText,
+          lastMessageTime: DateTime.now(),
+          isIncoming: true,
+        );
+        debugPrint('⬆️ Chat $chatType/$chatId updated and moved to top');
+      }
+    } catch (e) {
+      debugPrint('❌ Error handling incoming message: $e');
     }
-  }
-
-  /// Build queue status banner
-  Widget _buildQueueStatusBanner() {
-    final queueStats = OfflineQueueService.getQueueStats();
-    final total = queueStats['total'] ?? 0;
-    
-    if (total == 0) return const SizedBox.shrink();
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: Colors.orange.shade100,
-      child: Row(
-        children: [
-          const Icon(Icons.cloud_upload, size: 20, color: Colors.orange),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              '$total message${total > 1 ? 's' : ''} syncing in background',
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-            ),
-          ),
-          // No spinner - just show count
-          const SizedBox(
-            width: 16,
-            height: 16,
-            child: Icon(Icons.sync, size: 16, color: Colors.orange),
-          ),
-        ],
-      ),
-    );
   }
 
   void _checkPendingDeepLink() {
@@ -141,38 +118,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     debugPrint('Deep link received:_checkPendingDeepLink ${DeepLinkService.hasPendingMessage()}');
     if (DeepLinkService.hasPendingMessage()) {
       final message = DeepLinkService.getPendingMessage();
-      // DeepLinkService.setPendingMessage(null);
       debugPrint('Deep link received:_checkPendingDeepLink $message');
       if (message != null) {
         Future.delayed(const Duration(milliseconds: 800), () {
-          context.push('/chat-selection?message=${Uri.encodeComponent(message)}');
-        });
-      }
-    }
-  }
-
-  Future<void> _loadChatListOfflineFirst() async {
-    final cachedChats = await _syncService.getCachedChatList();
-    
-    if (cachedChats.isNotEmpty && mounted) {
-      ref.read(chatProvider.notifier).loadChatList();
-    }
-
-    final hasInternet = await InternetChecker.hasInternet();
-    if (hasInternet) {
-      try {
-        final token = await _storage.getToken();
-        if (token != null) {
-          final dio = Dio();
-          final apiService = ApiService(dio);
-          apiService.setAuthToken(token);
-          await _syncService.syncChatList();
           if (mounted) {
-            ref.read(chatProvider.notifier).loadChatList();
+            context.push('/chat-selection?message=${Uri.encodeComponent(message)}');
           }
-        }
-      } catch (e) {
-        debugPrint('❌ Background sync failed: $e');
+        });
       }
     }
   }
@@ -186,7 +138,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final authState = ref.watch(authProvider);
-    final chatState = ref.watch(chatProvider);
+    final chatState = ref.watch(optimizedChatProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -211,7 +163,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               icon: const Icon(Icons.search),
               onPressed: () async {
                 await context.push('/search');
-                _refreshChatList();
+                ref.read(optimizedChatProvider.notifier).refresh();
               },
             ),
           if (_isSearching)
@@ -229,7 +181,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               switch (value) {
                 case 'profile':
                   await context.push('/profile');
-                  _refreshChatList();
+                  ref.read(optimizedChatProvider.notifier).refresh();
                   break;
                 case 'logout':
                   ref.read(authProvider.notifier).logout();
@@ -244,7 +196,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     CircleAvatar(
                       radius: 12,
                       backgroundImage: authState.user?.profilePicture != null
-                          ? NetworkImage(authState.user!.profilePicture.toString().contains('https://gatewayreports.in/storage') ? authState.user!.profilePicture.toString(): 'https://gatewayreports.in/storage/${authState.user!.profilePicture}')
+                          ? NetworkImage(authState.user!.profilePicture.toString().contains('https://gatewayreports.in/storage') 
+                              ? authState.user!.profilePicture.toString()
+                              : 'https://gatewayreports.in/storage/${authState.user!.profilePicture}')
                           : null,
                       child: authState.user?.profilePicture == null
                           ? const Icon(Icons.person, size: 16)
@@ -255,38 +209,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ],
                 ),
               ),
-            if(kDebugMode)
-              const PopupMenuItem(
-                value: 'logout',
-                child: Row(
-                  children: [
-                    Icon(Icons.logout),
-                    SizedBox(width: 8),
-                    Text('Logout'),
-                  ],
+              if (kDebugMode)
+                const PopupMenuItem(
+                  value: 'logout',
+                  child: Row(
+                    children: [
+                      Icon(Icons.logout),
+                      SizedBox(width: 8),
+                      Text('Logout'),
+                    ],
+                  ),
                 ),
-              ),
             ],
           ),
         ],
       ),
       body: Container(
-        decoration: const BoxDecoration(
-          // image: DecorationImage(
-          //   image: AssetImage('assets/images/chat_bg.jpg'),
-          //   fit: BoxFit.cover,
-          //   opacity: 0.1,
-          // ),
-        ),
+        decoration: const BoxDecoration(),
         child: Column(
           children: [
-            // Offline Queue Status Banner
             _buildQueueStatusBanner(),
-
-            // Warning Slider
             WarningSlider(),
-
-            // Chat List
             Expanded(
               child: _buildChatsList(chatState),
             ),
@@ -302,22 +245,53 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  Widget _buildChatsList(dynamic chatState) {
-    // NO loading indicator - show cached data immediately
-    if (chatState.chats.isEmpty && chatState.error == null) {
+  Widget _buildQueueStatusBanner() {
+    final queueStats = OfflineQueueService.getQueueStats();
+    final total = queueStats['total'] ?? 0;
+    
+    if (total == 0) return const SizedBox.shrink();
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      color: Colors.orange.shade100,
+      child: Row(
+        children: [
+          const Icon(Icons.cloud_upload, size: 20, color: Colors.orange),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '$total message${total > 1 ? 's' : ''} syncing in background',
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+            ),
+          ),
+          const SizedBox(
+            width: 16,
+            height: 16,
+            child: Icon(Icons.sync, size: 16, color: Colors.orange),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildChatsList(OptimizedChatState chatState) {
+    if (chatState.isInitialLoading) {
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.chat_bubble_outline, size: 64, color: Colors.grey[400]),
+            const CircularProgressIndicator(),
             const SizedBox(height: 16),
-            Text('No chats yet', style: TextStyle(fontSize: 18, color: Colors.grey[600])),
+            Text(
+              'Loading chats...',
+              style: TextStyle(color: Colors.grey[600]),
+            ),
           ],
         ),
       );
     }
 
-    if (chatState.error != null) {
+    if (chatState.error != null && chatState.chats.isEmpty) {
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -329,7 +303,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             const SizedBox(height: 24),
             Text(
-              chatState.error.toString().contains('host lookup') ?  'Connection Issue' : 'Error Loading chats',
+              chatState.error.toString().contains('host lookup') 
+                  ? 'Connection Issue' 
+                  : 'Error Loading chats',
               style: TextStyle(
                 fontSize: 20,
                 fontWeight: FontWeight.bold,
@@ -340,7 +316,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 32),
               child: Text(
-                chatState.error.toString().contains('host lookup') ?  'Unable to load chats. Please check your internet connection and try again.' : chatState.error.toString(),
+                chatState.error.toString().contains('host lookup') 
+                    ? 'Unable to load chats. Please check your internet connection and try again.' 
+                    : chatState.error.toString(),
                 style: TextStyle(
                   fontSize: 15,
                   color: Colors.grey[600],
@@ -351,7 +329,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             const SizedBox(height: 24),
             ElevatedButton.icon(
               onPressed: () {
-                ref.read(chatProvider.notifier).loadChatList();
+                ref.read(optimizedChatProvider.notifier).refresh();
               },
               icon: const Icon(Icons.refresh),
               label: const Text('Retry'),
@@ -394,33 +372,167 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       );
     }
 
-    final List<Chat> allChats = List<Chat>.from(chatState.chats);
-
     return PullToRefreshWrapper(
       onRefresh: () async {
-        await ref.read(chatProvider.notifier).loadChatList();
+        await ref.read(optimizedChatProvider.notifier).refresh();
       },
       child: ListView.builder(
-        itemCount: allChats.length,
+        itemCount: chatState.chats.length,
         physics: const BouncingScrollPhysics(),
-        cacheExtent: 1000,
         addRepaintBoundaries: true,
         itemBuilder: (context, index) {
-          final chat = allChats[index];
-          return ChatTile(
-            chat: chat,
-            currentUserId: ref.read(authProvider).user!.id,
-            onTap: () async {
-              final chatName = chat.getDisplayName(ref.read(authProvider).user!.id, []);
-              if (chat.type == 'group') {
-                await context.push('/chat/${chat.id}?type=group&name=${Uri.encodeComponent(chatName)}');
-              } else {
-                await context.push('/chat/${chat.id}?type=user&name=${Uri.encodeComponent(chatName)}');
-              }
-              _refreshChatList();
-            },
-          );
+          final chat = chatState.chats[index];
+          return _buildChatTile(chat);
         },
+      ),
+    );
+  }
+
+  Widget _buildChatTile(chat) {
+    return ListTile(
+      onTap: () async {
+        // Mark as read immediately for smooth UX
+        if (chat.unreadCount > 0) {
+          ref.read(optimizedChatProvider.notifier).markAsRead(chat.id, chat.type);
+        }
+        debugPrint("Groupchat.attendanceGroup ${chat.toString()}");
+        debugPrint("Groupchat.attendanceGroup ${chat.attendanceGroup}");
+
+        if (chat.type == 'group') {
+          await context.push('/chat/${chat.id}?attendance_group=${chat.attendanceGroup}&type=group&name=${Uri.encodeComponent(chat.name)}');
+        } else {
+          await context.push('/chat/${chat.id}?attendance_group=${chat.attendanceGroup}&type=user&name=${Uri.encodeComponent(chat.name)}');
+        }
+        // Refresh chat list when returning from chat screen
+        ref.read(optimizedChatProvider.notifier).refresh();
+      },
+      onLongPress: () => _showChatOptions(chat),
+      leading: Stack(
+        children: [
+          CachedProfileImage(
+            imagePath: chat.imagePath,
+            size: 50,
+            fallbackText: chat.name,
+          ),
+          if (chat.isPinned)
+            Positioned(
+              top: 0,
+              right: 0,
+              child: Container(
+                width: 16,
+                height: 16,
+                decoration: BoxDecoration(
+                  color: Colors.grey[600],
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.push_pin,
+                  size: 10,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+        ],
+      ),
+      title: Row(
+        children: [
+          Expanded(
+            child: Text(
+              chat.name,
+              style: TextStyle(
+                fontWeight: chat.unreadCount > 0 ? FontWeight.bold : FontWeight.normal,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (chat.lastMessageTime != null)
+            Text(
+              _formatTime(chat.lastMessageTime),
+              style: TextStyle(
+                fontSize: 12,
+                color: chat.unreadCount > 0 ? Theme.of(context).primaryColor : Colors.grey[600],
+                fontWeight: chat.unreadCount > 0 ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+        ],
+      ),
+      subtitle: Row(
+        children: [
+          Expanded(
+            child: Text(
+              chat.lastMessage ?? 'Tap to start chatting',
+              style: TextStyle(
+                color: chat.unreadCount > 0 ? Colors.black87 : Colors.grey[600],
+                fontWeight: chat.unreadCount > 0 ? FontWeight.w500 : FontWeight.normal,
+                fontStyle: chat.lastMessage == null ? FontStyle.italic : FontStyle.normal,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+      trailing: chat.unreadCount > 0
+          ? Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Theme.of(context).primaryColor,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                chat.unreadCount > 99 ? '99+' : chat.unreadCount.toString(),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            )
+          : null,
+    );
+  }
+
+  String _formatTime(DateTime timestamp) {
+    final now = DateTime.now();
+    final difference = now.difference(timestamp);
+
+    if (difference.inDays == 0) {
+      return DateFormat('HH:mm').format(timestamp);
+    } else if (difference.inDays == 1) {
+      return 'Yesterday';
+    } else if (difference.inDays < 7) {
+      return DateFormat('EEEE').format(timestamp);
+    } else {
+      return DateFormat('dd/MM/yy').format(timestamp);
+    }
+  }
+
+  void _showChatOptions(chat) {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => Container(
+        padding: const EdgeInsets.symmetric(vertical: 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: Icon(chat.isPinned ? Icons.push_pin_outlined : Icons.push_pin),
+              title: Text(chat.isPinned ? 'Unpin Chat' : 'Pin Chat'),
+              onTap: () {
+                ref.read(optimizedChatProvider.notifier).togglePin(chat.id, chat.type, !chat.isPinned);
+                Navigator.pop(context);
+              },
+            ),
+            if (chat.unreadCount > 0)
+              ListTile(
+                leading: const Icon(Icons.done_all),
+                title: const Text('Mark as Read'),
+                onTap: () {
+                  ref.read(optimizedChatProvider.notifier).markAsRead(chat.id, chat.type);
+                  Navigator.pop(context);
+                },
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -448,7 +560,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               onTap: () async {
                 Navigator.pop(context);
                 await context.push('/search');
-                _refreshChatList();
+                ref.read(optimizedChatProvider.notifier).refresh();
               },
             ),
           ],

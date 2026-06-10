@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:intl/intl.dart';
 import '../../app/theme/app_theme.dart';
 import '../../core/models/chat_model.dart';
+import 'cached_profile_image.dart';
 
 class ChatTile extends StatelessWidget {
   final Chat chat;
@@ -26,36 +26,10 @@ class ChatTile extends StatelessWidget {
       onTap: onTap,
       leading: Stack(
         children: [
-          CircleAvatar(
-            radius: 25,
-            backgroundColor: Colors.grey[300],
-            child: displayImage != null && displayImage.isNotEmpty
-                ? CachedNetworkImage(
-                    imageUrl: displayImage,
-                    imageBuilder: (context, imageProvider) => Container(
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        image: DecorationImage(
-                          image: imageProvider,
-                          fit: BoxFit.cover,
-                        ),
-                      ),
-                    ),
-                    placeholder: (context, url) => CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.grey[400]!),
-                    ),
-                    errorWidget: (context, url, error) => Icon(
-                      chat.isGroup ? Icons.group : Icons.person,
-                      color: Colors.grey[600],
-                      size: 30,
-                    ),
-                  )
-                : Icon(
-                    chat.isGroup ? Icons.group : Icons.person,
-                    color: Colors.grey[600],
-                    size: 30,
-                  ),
+          CachedProfileImage(
+            imagePath: displayImage,
+            size: 50,
+            fallbackText: displayName,
           ),
           if (chat.isPinned)
             Positioned(

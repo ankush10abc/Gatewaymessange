@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/message_model.dart';
 import '../services/api_service_simple.dart';
 import '../services/firebase_realtime_service.dart';
+import '../services/chat_list_sync_service.dart';
 import '../services/offline_queue_service.dart';
 
 /// Handles optimistic UI updates - show immediately, sync in background
@@ -107,7 +108,6 @@ class OptimisticUpdateHandler {
         );
       }
 
-      // Update Firebase with msgId
       if (firebaseKey != null && firebaseKey.isNotEmpty) {
         await FirebaseRealtimeService.updateMessage(
           message,
@@ -118,6 +118,18 @@ class OptimisticUpdateHandler {
           key: firebaseKey,
         );
       }
+
+      // Update chat list via sync service
+      final syncService = ChatListSyncService();
+      await syncService.updateChatOnMessage(
+        chatId: chatId,
+        chatType: chatType,
+        lastMessage: message.text,
+        lastMessageTime: message.timestamp,
+        senderId: message.senderId,
+        senderName: message.senderName,
+        incrementUnread: false,
+      );
 
       if (onSuccess != null) {
         onSuccess(apiMessage);

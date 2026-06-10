@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import '../models/chat_model.dart';
 import '../models/message_model.dart';
 import '../utils/chat_utils.dart';
+import 'chat_list_update_service.dart';
 
 class FirebaseRealtimeService {
   static FirebaseFirestore get firestore => FirebaseFirestore.instance;
@@ -146,6 +147,13 @@ class FirebaseRealtimeService {
         'lastMessage': messageData,
         'updatedAt': ServerValue.timestamp,
       });
+      
+      // Trigger chat list update for sender
+      ChatListUpdateService.updateOnMessageSent(
+        chatId: message.chatId,
+        chatType: chatType ?? 'group',
+        lastMessage: message.text,
+      );
     } catch (e) {
       debugPrint("Error sending message: $e");
     }

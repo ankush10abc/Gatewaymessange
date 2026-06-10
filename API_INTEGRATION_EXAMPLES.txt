@@ -1,0 +1,513 @@
+API INTEGRATION EXAMPLES
+========================
+
+All these APIs are already implemented in api_service_simple.dart.
+Below are usage examples with real request/response flows.
+
+================================================================================
+API 1: BATCH MESSAGE SEND (Offline Queue Sync)
+================================================================================
+
+PURPOSE: Send multiple queued messages in one request after coming back online
+
+USAGE EXAMPLE:
+--------------
+```dart
+import 'package:dio/dio.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+// Example: Send 3 queued messages (2 text, 1 image)
+final apiService = ApiService(Dio());
+apiService.setAuthToken('your_token_here');
+
+final queuedMessages = [
+  {
+    'temp_id': 'temp_1705315800000',
+    'chat_id': '1',
+    'chat_type': 'group',
+    'type': 'text',
+    'message': 'Hello sent offline',
+    'firebase_key': 'firebase_key_abc123',
+    'client_timestamp': '2024-01-15T10:30:00Z',
+  },
+  {
+    'temp_id': 'temp_1705315900000',
+    'chat_id': '2',
+    'chat_type': 'user',
+    'type': 'text',
+    'message': 'Private message',
+    'firebase_key': 'firebase_key_def456',
+    'reply_to_message_id': 450,  // Reply to previous message
+  },
+  {
+    'temp_id': 'temp_1705316000000',
+    'chat_id': '1',
+    'chat_type': 'group',
+    'type': 'image',
+    'message': 'Check this photo',
+    'firebase_key': 'firebase_key_ghi789',
+    'file_path': 'uploads/images/img_123.jpg',
+    'file_name': 'photo.jpg',
+    'file_size': 245678,
+  },
+];
+
+try {
+  final response = await apiService.batchSendMessages(queuedMessages);
+  
+  if (response['success'] == true) {
+    final sent = response['data']['sent'] as List;
+    final failed = response['data']['failed'] as List;
+    
+    print('✅ Sent: ${sent.length} messages');
+    print('❌ Failed: ${failed.length} messages');
+    
+    // Update local database with server IDs
+    for (final msg in sent) {
+      final tempId = msg['temp_id'];
+      final serverId = msg['id'];
+      // Update Hive: Replace temp_id with server id
+      await updateMessageId(tempId, serverId);
+    }
+  }
+} catch (e) {
+  print('Error: $e');
+}
+```
+
+EXPECTED RESPONSE:
+```json
+{
+  "success": true,
+  "data": {
+    "sent": [
+      {
+        "temp_id": "temp_1705315800000",
+        "id": "501",
+        "msgId": "501",
+        "status": "sent",
+        "created_at": "2024-01-15T10:30:05Z"
+      },
+      {
+        "temp_id": "temp_1705315900000",
+        "id": "502",
+        "msgId": "502",
+        "status": "sent",
+        "created_at": "2024-01-15T10:31:03Z"
+      },
+      {
+        "temp_id": "temp_1705316000000",
+        "id": "503",
+        "msgId": "503",
+        "status": "sent",
+        "created_at": "2024-01-15T10:32:02Z"
+      }
+    ],
+    "failed": [],
+    "total_sent": 3,
+    "total_failed": 0
+  }
+}
+```
+
+================================================================================
+API 2: INCREMENTAL MESSAGE SYNC
+================================================================================
+
+PURPOSE: Fetch only new/updated/deleted messages since last sync (saves bandwidth)
+
+USAGE EXAMPLE:
+--------------
+```dart
+// Get last sync time from Hive
+final lastSync = await hiveBox.get('last_sync_group_1') ?? 
+                 DateTime.now().subtract(Duration(days: 7));
+
+try {
+  final response = await apiService.syncMessages(
+    chatId: '1',
+    chatType: 'group',
+    since: lastSync,
+    limit: 100,
+  );
+  
+  if (response['success'] == true) {
+    final data = response['data'];
+    final newMessages = data['messages'] as List;
+    final deletedIds = data['deleted_message_ids'] as List;
+    final updatedMessages = data['updated_messages'] as List;
+    
+    print('📥 New: ${newMessages.length}');
+    print('🗑️ Deleted: ${deletedIds.length}');
+    print('✏️ Updated: ${updatedMessages.length}');
+    
+    // Update local Hive database
+    for (final msg in newMessages) {
+      await saveMessageToHive(Message.fromJson(msg));
+    }
+    
+    for (final msgId in deletedIds) {
+      await deleteMessageFromHive(msgId);
+    }
+    
+    for (final msg in updatedMessages) {
+      await updateMessageInHive(Message.fromJson(msg));
+    }
+    
+    // Save sync timestamp
+    await hiveBox.put('last_sync_group_1', data['synced_at']);
+  }
+} catch (e) {
+  print('Error: $e');
+}
+```
+
+EXPECTED RESPONSE:
+```json
+{
+  "success": true,
+  "data": {
+    "messages": [
+      {
+        "id": "101",
+        "msgId": "101",
+        "chat_id": "1",
+        "sender_id": "5",
+        "sender_name": "Teacher Name",
+        "profile_picture_url": "https://gatewayreports.in/storage/profiles/teacher.jpg",
+        "content": "Hello class",
+        "type": "text",
+        "created_at": "2024-01-15T10:30:00Z",
+        "firebase_id": "firebase_key_abc",
+        "reply_to_message_id": null,
+        "is_forwarded": false
+      }
+    ],
+    "deleted_message_ids": ["85", "92"],
+    "updated_messages": [
+      {
+        "id": "95",
+        "msgId": "95",
+        "content": "Updated message text",
+        "updated_at": "2024-01-15T10:35:00Z"
+      }
+    ],
+    "has_more": false,
+    "next_page_token": null,
+    "synced_at": "2024-01-15T10:35:00Z"
+  }
+}
+```
+
+================================================================================
+API 3: INCREMENTAL CHAT LIST SYNC
+================================================================================
+
+PURPOSE: Sync only changed chats (new/updated/deleted) instead of full list
+
+USAGE EXAMPLE:
+--------------
+```dart
+// Get last chat list sync time
+final lastChatSync = await hiveBox.get('last_chat_sync') ?? 
+                     DateTime.now().subtract(Duration(days: 1));
+
+try {
+  final response = await apiService.syncChats(
+    since: lastChatSync,
+    limit: 50,
+  );
+  
+  if (response['success'] == true) {
+    final data = response['data'];
+    final newChats = data['new_chats'] as List;
+    final updatedChats = data['updated_chats'] as List;
+    final deletedIds = data['deleted_chat_ids'] as List;
+    
+    print('🆕 New chats: ${newChats.length}');
+    print('🔄 Updated chats: ${updatedChats.length}');
+    print('🗑️ Deleted chats: ${deletedIds.length}');
+    
+    // Update Hive
+    for (final chat in newChats) {
+      await saveChatToHive(ChatHiveModel.fromApi(chat));
+    }
+    
+    for (final chat in updatedChats) {
+      await updateChatInHive(ChatHiveModel.fromApi(chat));
+    }
+    
+    for (final chatId in deletedIds) {
+      await deleteChatFromHive(chatId);
+    }
+    
+    // Save sync time
+    await hiveBox.put('last_chat_sync', data['synced_at']);
+  }
+} catch (e) {
+  print('Error: $e');
+}
+```
+
+EXPECTED RESPONSE:
+```json
+{
+  "success": true,
+  "data": {
+    "new_chats": [
+      {
+        "id": "25",
+        "type": "group",
+        "name": "Class 10-A",
+        "profile_picture": "https://gatewayreports.in/storage/groups/class10a.jpg",
+        "last_message": "Homework reminder",
+        "last_message_time": "2024-01-15T10:30:00Z",
+        "unread_count": 5,
+        "is_pinned": false,
+        "attendance_group": 1,
+        "member_count": 45,
+        "created_at": "2024-01-15T08:00:00Z"
+      }
+    ],
+    "updated_chats": [
+      {
+        "id": "1",
+        "type": "group",
+        "name": "Staff Room",
+        "last_message": "Meeting at 3 PM",
+        "last_message_time": "2024-01-15T10:35:00Z",
+        "unread_count": 2,
+        "updated_at": "2024-01-15T10:35:00Z"
+      }
+    ],
+    "deleted_chat_ids": ["18", "22"],
+    "synced_at": "2024-01-15T10:36:00Z"
+  }
+}
+```
+
+================================================================================
+API 4: BATCH MARK AS READ
+================================================================================
+
+PURPOSE: Mark multiple messages as read in one API call (efficient)
+
+USAGE EXAMPLE:
+--------------
+```dart
+// Mark 5 messages as read in group chat
+try {
+  final response = await apiService.batchMarkAsRead(
+    messageIds: [501, 502, 503, 504, 505],
+    chatId: '1',
+    chatType: 'group',
+  );
+  
+  if (response['success'] == true) {
+    final markedCount = response['data']['marked_count'];
+    final markedAt = response['data']['marked_at'];
+    
+    print('✅ Marked $markedCount messages as read at $markedAt');
+    
+    // Update local Hive
+    await updateMessagesReadStatus([501, 502, 503, 504, 505], markedAt);
+  }
+} catch (e) {
+  print('Error: $e');
+}
+```
+
+EXPECTED RESPONSE:
+```json
+{
+  "success": true,
+  "data": {
+    "marked_count": 5,
+    "failed_ids": [],
+    "marked_at": "2024-01-15T10:45:00+00:00"
+  }
+}
+```
+
+================================================================================
+API 5: QUEUE STATUS CHECK
+================================================================================
+
+PURPOSE: Check how many messages are pending/failed in offline queue
+
+USAGE EXAMPLE:
+--------------
+```dart
+try {
+  final response = await apiService.getQueueStatus();
+  
+  if (response['success'] == true) {
+    final pending = response['data']['pending_messages'];
+    final uploads = response['data']['pending_uploads'];
+    final failed = response['data']['failed_messages'];
+    final isFull = response['data']['is_queue_full'];
+    final maxSize = response['data']['max_queue_size'];
+    
+    print('📊 Queue Status:');
+    print('   Pending: $pending');
+    print('   Uploads: $uploads');
+    print('   Failed: $failed');
+    print('   Capacity: $pending/$maxSize ${isFull ? "(FULL)" : ""}');
+    
+    // Show warning if queue is full
+    if (isFull) {
+      showWarning('Message queue full. Please connect to internet.');
+    }
+  }
+} catch (e) {
+  print('Error: $e');
+}
+```
+
+EXPECTED RESPONSE:
+```json
+{
+  "success": true,
+  "data": {
+    "pending_messages": 12,
+    "pending_uploads": 3,
+    "failed_messages": 0,
+    "oldest_pending_timestamp": "2024-01-15T10:30:00+00:00",
+    "queue_size_mb": 2.5,
+    "is_queue_full": false,
+    "max_queue_size": 1000
+  }
+}
+```
+
+================================================================================
+API 6: APP VERSION CHECK
+================================================================================
+
+PURPOSE: Check for app updates (force/optional) without authentication
+
+USAGE EXAMPLE:
+--------------
+```dart
+import 'package:package_info_plus/package_info_plus.dart';
+
+// Get current app version
+final packageInfo = await PackageInfo.fromPlatform();
+final currentVersion = packageInfo.version; // e.g., "1.0.23"
+
+try {
+  // No auth token required for this API
+  final response = await apiService.checkAppVersion(
+    currentVersion: currentVersion,
+  );
+  
+  if (response['success'] == true) {
+    final data = response['data'];
+    final updateAvailable = data['update_available'];
+    
+    if (updateAvailable) {
+      final updateType = data['update_type']; // "force" or "optional"
+      final latestVersion = data['latest_version'];
+      final releaseNotes = data['release_notes'];
+      final downloadUrl = data['download_url'];
+      
+      if (updateType == 'force') {
+        // Show blocking dialog
+        showForceUpdateDialog(
+          message: data['force_update_message'],
+          downloadUrl: downloadUrl,
+        );
+      } else {
+        // Show optional dialog
+        showOptionalUpdateDialog(
+          currentVersion: currentVersion,
+          latestVersion: latestVersion,
+          releaseNotes: releaseNotes,
+          downloadUrl: downloadUrl,
+        );
+      }
+    } else {
+      print('✅ App is up to date');
+    }
+  }
+} catch (e) {
+  print('Error: $e');
+}
+```
+
+EXPECTED RESPONSE (Force Update):
+```json
+{
+  "success": true,
+  "data": {
+    "update_available": true,
+    "current_version": "1.0.18",
+    "latest_version": "1.0.25",
+    "update_type": "force",
+    "can_skip": false,
+    "force_update_message": "Critical security update required",
+    "download_url": "https://play.google.com/store/apps/details?id=com.gateway.messenger",
+    "direct_apk_url": "https://gatewayreports.in/downloads/app-v1.0.25.apk"
+  }
+}
+```
+
+EXPECTED RESPONSE (Optional Update):
+```json
+{
+  "success": true,
+  "data": {
+    "update_available": true,
+    "current_version": "1.0.23",
+    "latest_version": "1.0.25",
+    "update_type": "optional",
+    "can_skip": true,
+    "release_notes": "- Bug fixes\n- Performance improvements",
+    "download_url": "https://play.google.com/store/apps/details?id=com.gateway.messenger",
+    "direct_apk_url": "https://gatewayreports.in/downloads/app-v1.0.25.apk",
+    "apk_size_mb": 25.5,
+    "release_date": "2024-01-15"
+  }
+}
+```
+
+EXPECTED RESPONSE (No Update):
+```json
+{
+  "success": true,
+  "data": {
+    "update_available": false,
+    "current_version": "1.0.25",
+    "latest_version": "1.0.25",
+    "message": "You have the latest version"
+  }
+}
+```
+
+================================================================================
+IMPLEMENTATION STATUS
+================================================================================
+
+✅ API 1: Batch Message Send - IMPLEMENTED in api_service_simple.dart
+✅ API 2: Incremental Message Sync - IMPLEMENTED in api_service_simple.dart
+✅ API 3: Incremental Chat List Sync - IMPLEMENTED in api_service_simple.dart
+✅ API 4: Batch Mark as Read - IMPLEMENTED in api_service_simple.dart
+✅ API 5: Queue Status - IMPLEMENTED in api_service_simple.dart
+✅ API 6: App Version Check - IMPLEMENTED in api_service_simple.dart
+
+All APIs include:
+- Proper request formatting
+- Comprehensive debug logging
+- Error handling with DioException
+- Detailed response parsing
+- Request/response examples in comments
+
+NEXT STEPS:
+-----------
+1. Integrate these APIs into offline_queue_service.dart
+2. Use batchSendMessages() when sending queued messages
+3. Use syncMessages() for efficient message loading
+4. Use syncChats() instead of full getChatList()
+5. Use batchMarkAsRead() when marking multiple messages
+6. Show queue status banner using getQueueStatus()
+7. Check for updates on app start using checkAppVersion()

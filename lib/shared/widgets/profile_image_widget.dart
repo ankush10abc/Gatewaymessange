@@ -74,15 +74,35 @@ class ProfileImageWidget extends StatelessWidget {
     }
   }
 
+  // String _getInitials(String name) {
+  //   if (name.isEmpty) return '?';
+  //
+  //   final words = name.trim().split(' ');
+  //   if (words.length == 1) {
+  //     return words[0][0].toUpperCase();
+  //   } else {
+  //     return '${words[0][0]}${words[1][0]}'.toUpperCase();
+  //   }
+  // }
   String _getInitials(String name) {
-    if (name.isEmpty) return '?';
+    if (name.trim().isEmpty) return '?';
 
-    final words = name.trim().split(' ');
-    if (words.length == 1) {
-      return words[0][0].toUpperCase();
-    } else {
-      return '${words[0][0]}${words[1][0]}'.toUpperCase();
+    // Remove extra spaces and empty values
+    final words = name
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((word) => word.isNotEmpty)
+        .toList();
+
+    if (words.isEmpty) {
+      return '?';
     }
+
+    if (words.length == 1) {
+      return words.first[0].toUpperCase();
+    }
+
+    return '${words[0][0]}${words[1][0]}'.toUpperCase();
   }
 }
 

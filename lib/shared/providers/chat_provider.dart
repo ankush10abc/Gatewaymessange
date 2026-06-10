@@ -2,9 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:dio/dio.dart';
 import '../../core/models/chat_model.dart';
+import '../../core/models/message_model.dart';
 import '../../core/services/firebase_service.dart';
 import '../../core/services/api_service_simple.dart';
 import '../../core/services/sync_service.dart';
+import '../../core/services/chat_list_manager.dart';
 import '../../core/storage/storage_service.dart';
 import 'package:hive/hive.dart';
 
@@ -39,26 +41,28 @@ class ChatState {
 class ChatNotifier extends StateNotifier<ChatState> {
   late final ApiService _apiService;
   final StorageService _storage = StorageService();
-  late Box _chatCacheBox;
+  String? _currentUserId;
 
   ChatNotifier() : super(ChatState()) {
     final dio = Dio();
     _apiService = ApiService(dio);
-    _initializeCache();
+    _initializeChatManager();
   }
 
-  Future<void> _initializeCache() async {
-    _chatCacheBox = await Hive.openBox('chat_list_cache');
+  Future<void> _initializeChatManager() async {
+    final userId = await _storage.getUserId();
+    if (userId != null) {
+      _currentUserId = userId;
+      await ChatListManager.init(userId);
+    }
   }
 
   Future<void> loadChatList() async {
-    // INSTANT: Load from cache immediately (0ms)
-    final cached = await _loadCachedChats();
-    if (cached.isNotEmpty) {
-      state = state.copyWith(chats: cached, isLoading: false);
+    final cachedChats = ChatListManager.getSortedChatList();
+    if (cachedChats.isNotEmpty) {
+      state = state.copyWith(chats: cachedChats, isLoading: false);
     }
     
-    // Background sync - NO loading indicator, NO blocking
     _syncInBackground();
   }
 
@@ -74,49 +78,18 @@ class ChatNotifier extends StateNotifier<ChatState> {
       
       for (final item in response) {
         final itemMap = item as Map<String, dynamic>;
-        if (itemMap['type'] == 'group') {
-          chats.add(Chat(
-            id: itemMap['id'].toString(),
-            type: 'group',
-            participants: [],
-            createdAt: DateTime.tryParse(itemMap['updated_at'] ?? '') ?? DateTime.now(),
-            updatedAt: DateTime.tryParse(itemMap['updated_at'] ?? '') ?? DateTime.now(),
-            unreadCount: {},
-            isPinned: itemMap['is_pinned'] ?? false,
-            groupName: itemMap['name'],
-            profile_picture: itemMap['profile_picture'],
-            attendance_group: itemMap['attendance_group'],
-            unread_count: itemMap['unread_count'],
-            actual_role: itemMap['actual_role'],
-          ));
-        } else if (itemMap['type'] == 'user') {
-          chats.add(Chat(
-            id: itemMap['id'].toString(),
-            type: 'user',
-            participants: [itemMap['id'].toString()],
-            createdAt: DateTime.now(),
-            updatedAt: DateTime.now(),
-            unreadCount: {},
-            isPinned: itemMap['is_pinned'] ?? false,
-            groupName: itemMap['name'],
-            profile_picture: itemMap['profile_picture'],
-            attendance_group: itemMap['attendance_group'],
-            unread_count: itemMap['unread_count'],
-            actual_role: itemMap['actual_role'],
-          ));
-        }
+        chats.add(Chat.fromJson(itemMap));
       }
       
-      // Silently update UI and cache
+      await ChatListManager.syncFromAPI(chats);
+      
+      final sortedChats = ChatListManager.getSortedChatList();
       state = state.copyWith(
-        chats: chats,
+        chats: sortedChats,
         isLoading: false,
         lastSyncTime: DateTime.now(),
       );
-      
-      await _saveCachedChats(chats);
     } catch (e) {
-      // Silent failure - keep showing cached data
       debugPrint('Background sync failed: $e');
       if (state.chats.isEmpty) {
         state = state.copyWith(error: e.toString(), isLoading: false);
@@ -124,28 +97,42 @@ class ChatNotifier extends StateNotifier<ChatState> {
     }
   }
 
-  Future<List<Chat>> _loadCachedChats() async {
-    try {
-      final cached = _chatCacheBox.get('chats');
-      if (cached != null && cached is List) {
-        return cached.map((item) {
-          final map = Map<String, dynamic>.from(item);
-          return Chat.fromJson(map);
-        }).toList();
-      }
-    } catch (e) {
-      debugPrint('Cache load error: $e');
-    }
-    return [];
+  Future<void> onMessageSent(String chatId, String chatType, Message message) async {
+    if (_currentUserId == null) return;
+    
+    await ChatListManager.onMessageSent(
+      chatId: chatId,
+      chatType: chatType,
+      message: message,
+      currentUserId: _currentUserId!,
+    );
+    
+    final sortedChats = ChatListManager.getSortedChatList();
+    state = state.copyWith(chats: sortedChats);
   }
 
-  Future<void> _saveCachedChats(List<Chat> chats) async {
-    try {
-      final jsonList = chats.map((c) => c.toJson()).toList();
-      await _chatCacheBox.put('chats', jsonList);
-    } catch (e) {
-      debugPrint('Cache save error: $e');
-    }
+  Future<void> onMessageReceived(String chatId, String chatType, Message message, bool isChatScreenOpen) async {
+    if (_currentUserId == null) return;
+    
+    await ChatListManager.onMessageReceived(
+      chatId: chatId,
+      chatType: chatType,
+      message: message,
+      currentUserId: _currentUserId!,
+      isChatScreenOpen: isChatScreenOpen,
+    );
+    
+    final sortedChats = ChatListManager.getSortedChatList();
+    state = state.copyWith(chats: sortedChats);
+  }
+
+  Future<void> resetUnreadCount(String chatId) async {
+    if (_currentUserId == null) return;
+    
+    await ChatListManager.resetUnreadCount(chatId, _currentUserId!);
+    
+    final sortedChats = ChatListManager.getSortedChatList();
+    state = state.copyWith(chats: sortedChats);
   }
 
   void loadUserChats(String userId) {
