@@ -89,9 +89,9 @@ class HiveChatDataSource {
     return chats;
   }
 
-  ChatHiveModel? getChatById(String id, String type) {
+  ChatHiveModel? getChatById(String id, String type, bool attendance_group) {
     _ensureInitialized();
-    final key = '${type}_$id';
+    final key =attendance_group == false ? '${type}_$id' : '${type}_$id$attendance_group'  ;
     return _chatBox!.get(key);
   }
 
@@ -153,12 +153,13 @@ class HiveChatDataSource {
     required String chatId,
     required String chatType,
     required String lastMessage,
+    required bool attendanceGroup,
     required DateTime lastMessageTime,
     bool incrementUnread = false,
   }) async {
     _ensureInitialized();
     
-    final key = '${chatType}_$chatId';
+    final key =  attendanceGroup == false ? '${chatType}_$chatId': '${chatType}_$chatId$attendanceGroup';
     final chat = _chatBox!.get(key);
     if (chat != null) {
       final newUnreadCount = incrementUnread ? chat.unreadCount + 1 : chat.unreadCount;
@@ -205,7 +206,7 @@ class HiveChatDataSource {
     debugPrint('💬 Upserted chat: ${chat.name} (key: $key)');
   }
 
-  Future<void> updateUnreadCount(String chatId, String chatType, int count) async {
+  Future<void> updateUnreadCount(String chatId, String chatType, int count, bool attendance_group) async {
     _ensureInitialized();
     
     final key = '${chatType}_$chatId';

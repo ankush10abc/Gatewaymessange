@@ -250,8 +250,7 @@ class ApiService {
 
   // Authentication APIs
   Future<AuthResponse> login(LoginRequest request) async {
-    debugPrint(
-        'API Call: POST $baseUrl/api/login - Request:lo ${request.toJson()}');
+    debugPrint('API Call: POST $baseUrl/api/login - Request:lo ${request.toJson()}');
     try {
       final response = await _dio.post(
         '/api/login',
@@ -266,17 +265,17 @@ class ApiService {
       debugPrint('❌ Login Error:');
       debugPrint('   → Status: ${e.response?.statusCode}');
       debugPrint('   → Response: ${e.response?.data}');
-      
+
       // Extract error message from response
       String errorMessage = 'Login failed';
-      
+
       if (e.response?.data != null) {
         final responseData = e.response!.data;
-        
+
         // Handle different response formats
         if (responseData is Map<String, dynamic>) {
-          errorMessage = responseData['message'] ?? 
-                        responseData['error'] ?? 
+          errorMessage = responseData['message'] ??
+                        responseData['error'] ??
                         'Invalid credentials';
         } else if (responseData is String) {
           errorMessage = responseData;
@@ -288,7 +287,7 @@ class ApiService {
       } else if (e.type == DioExceptionType.connectionError) {
         errorMessage = 'No internet connection';
       }
-      
+
       throw Exception(errorMessage);
     } catch (e) {
       debugPrint('❌ Unexpected Login Error: $e');
@@ -1143,7 +1142,7 @@ class ApiService {
 
     try {
       final response = await _dio.get(
-        '/api/app/version-check',
+        '/api/app/version-check$currentVersion',
         queryParameters: params,
         options: Options(
           headers: {'Accept': 'application/json',

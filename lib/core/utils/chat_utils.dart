@@ -1,9 +1,9 @@
 class ChatUtils {
   /// Generate consistent chat ID for both group and one-to-one chats
-  static String generateChatId(String chatId, {String? currentUserId, String? otherUserId, String? chatType}) {
+  static String generateChatId(String chatId, {String? currentUserId, String? otherUserId, String? chatType, bool? attendanceGroup}) {
     // Use chatType if provided
     if (chatType == 'group') {
-      return 'group_$chatId';
+      return attendanceGroup == true ? 'group_${chatId}true' : 'group_$chatId';
     }
     
     if (chatType == 'private' || chatType == 'user') {
@@ -16,7 +16,7 @@ class ChatUtils {
     
     // Fallback: detect from chatId format
     if (chatType!.contains('group') ) {
-      return 'group_$chatId';
+      return attendanceGroup == true ? 'group_${chatId}true' : 'group_$chatId';
     }
     
     // Default to private chat

@@ -93,13 +93,14 @@ class ChatRepository {
     return await syncChatsFromApi(force: true);
   }
 
-  ChatHiveModel? getChatById(String id, String type) {
-    return _localDataSource.getChatById(id, type);
+  ChatHiveModel? getChatById(String id, String type, bool attendanceGroup) {
+    return _localDataSource.getChatById(id, type,attendanceGroup);
   }
 
   Future<void> updateChatWithNewMessage({
     required String chatId,
     required String chatType,
+    required bool attendanceGroup,
     required String lastMessage,
     required DateTime lastMessageTime,
     bool isIncoming = false,
@@ -108,6 +109,7 @@ class ChatRepository {
     await _syncService.updateChatOnMessage(
       chatId: chatId,
       chatType: chatType,
+      attendanceGroup: attendanceGroup,
       lastMessage: lastMessage,
       lastMessageTime: lastMessageTime,
       incrementUnread: isIncoming,
@@ -119,8 +121,8 @@ class ChatRepository {
     await _localDataSource.upsertChat(chat);
   }
 
-  Future<void> markChatAsRead(String chatId, String chatType) async {
-    await _syncService.markAsRead(chatId, chatType);
+  Future<void> markChatAsRead(String chatId, String chatType, bool attendance_group) async {
+    await _syncService.markAsRead(chatId, chatType, attendance_group ?? false);
   }
 
   Future<void> togglePinChat(String chatId, String chatType, bool isPinned) async {

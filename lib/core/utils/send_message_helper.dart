@@ -12,6 +12,7 @@ class SendMessageHelper {
     required String chatId,
     required String chatType,
     required String messageText,
+    required bool attendanceGroup,
     String? currentUserId,
     String? otherUserId,
     String? replyToMessageId,
@@ -39,6 +40,7 @@ class SendMessageHelper {
       await ChatListUpdateService.updateOnMessageSent(
         chatId: chatId,
         chatType: chatType,
+        attendanceGroup: attendanceGroup,
         lastMessage: messageText,
         senderId: currentUserId,
       );
@@ -53,6 +55,7 @@ class SendMessageHelper {
   Future<void> sendMessageWithFile({
     required String chatId,
     required String chatType,
+    required bool attendanceGroup,
     required String messageText,
     required String filePath,
     required String fileType,
@@ -83,6 +86,7 @@ class SendMessageHelper {
       await ChatListUpdateService.updateOnMessageSent(
         chatId: chatId,
         chatType: chatType,
+        attendanceGroup: attendanceGroup,
         lastMessage: previewText,
         senderId: currentUserId,
       );

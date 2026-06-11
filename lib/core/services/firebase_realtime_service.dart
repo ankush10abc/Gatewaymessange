@@ -15,29 +15,16 @@ class FirebaseRealtimeService {
 
   // Send message to Firebase Realtime Database
   static Future<String> getKey(Message message,
-      {String? currentUserId, String? otherUserId, String? chatType}) async {
+      {String? currentUserId, String? otherUserId, String? chatType, bool? attendanceGroup}) async {
     final chatId = ChatUtils.generateChatId(message.chatId,
         currentUserId: currentUserId,
         otherUserId: otherUserId,
-        chatType: chatType);
+        chatType: chatType,
+        attendanceGroup: attendanceGroup);
     debugPrint(
         'Sending message to Firebase chat ID: ${message.chatId} currentUserId $currentUserId (original: $otherUserId)');
 
     final messageRef = database.ref('chats/$chatId/messages').push();
-    // final messageData = message.toJson();
-    // messageData['timestamp'] =
-    //     ServerValue.timestamp; // Use server timestamp for ordering
-    // messageData['id'] = messageRef.key!;
-    // messageData['chatId'] = message.chatId!;
-    // messageData['status'] = {'default': 'sent'};
-    // messageData['msgId'] =  chatIdServer;
-    // await messageRef.set(messageData);
-    //
-    // // Update last message in chat
-    // await database.ref('chats/$chatId').update({
-    //   'lastMessage': messageData,
-    //   'updatedAt': ServerValue.timestamp,
-    // });
 
     return messageRef.key!;
   }
@@ -48,11 +35,13 @@ class FirebaseRealtimeService {
       String? otherUserId,
       String? chatType,
       String? chatIdServer,
-      String? key}) async {
+      String? key,
+      bool? attendanceGroup}) async {
     final chatId = ChatUtils.generateChatId(message.chatId,
         currentUserId: currentUserId,
         otherUserId: otherUserId,
-        chatType: chatType);
+        chatType: chatType,
+        attendanceGroup: attendanceGroup);
 
     debugPrint("Ankush api/message/save - check key $key");
     // Only update if key exists to prevent duplicate updates
@@ -74,15 +63,16 @@ class FirebaseRealtimeService {
       String? otherUserId,
       String? chatType,
       String? chatIdServer,
-      String? key}) async {
+      String? key,
+      bool? attendanceGroup}) async {
     final chatId = ChatUtils.generateChatId(message.chatId,
         currentUserId: currentUserId,
         otherUserId: otherUserId,
-        chatType: chatType);
+        chatType: chatType,
+        attendanceGroup: attendanceGroup);
     debugPrint(
         'Sending message to Firebase chat ID: ${message.chatId} currentUserId $currentUserId (original: $otherUserId)');
 
-    // final messageRef = database.ref('chats/$chatId/messages').push();
     final messageData = message.toJson();
     messageData['timestamp'] =
         ServerValue.timestamp; // Use server timestamp for ordering
@@ -90,10 +80,8 @@ class FirebaseRealtimeService {
     messageData['chatId'] = message.chatId;
     messageData['status'] = {'default': 'sent'};
     messageData['msgId'] = chatIdServer;
-    // await messageRef.set(messageData);
 
     await database.ref('chats/$chatId/messages/$key').update(messageData);
-    // Update last message in chat
 
     await database.ref('chats/$chatId').update({
       'lastMessage': messageData,
@@ -106,11 +94,13 @@ class FirebaseRealtimeService {
       {String? currentUserId,
       String? otherUserId,
       String? chatType,
+      bool? attendanceGroup,
       String? chatIdServer}) async {
     final chatId = ChatUtils.generateChatId(message.chatId,
         currentUserId: currentUserId,
         otherUserId: otherUserId,
-        chatType: chatType);
+        chatType: chatType,
+        attendanceGroup: attendanceGroup);
 
     final messageRef = database.ref('chats/$chatId/messages').push();
     final messageData = message.toJson();
@@ -152,6 +142,7 @@ class FirebaseRealtimeService {
       ChatListUpdateService.updateOnMessageSent(
         chatId: message.chatId,
         chatType: chatType ?? 'group',
+        attendanceGroup: attendanceGroup ?? false,
         lastMessage: message.text,
       );
     } catch (e) {
@@ -163,11 +154,12 @@ class FirebaseRealtimeService {
 
   // Send message to Firebase Realtime Database
   static Future<void> sendMessageSingle(Message message,
-      {String? currentUserId, String? otherUserId, String? chatType}) async {
+      {String? currentUserId, String? otherUserId, String? chatType, bool? attendanceGroup}) async {
     final chatId = ChatUtils.generateChatId(message.chatId,
         currentUserId: currentUserId,
         otherUserId: otherUserId,
-        chatType: chatType);
+        chatType: chatType,
+        attendanceGroup: attendanceGroup);
     debugPrint(
         'Sending message to Firebase chat ID: ${message.chatId} currentUserId $currentUserId (original: $otherUserId)');
 
@@ -190,12 +182,14 @@ class FirebaseRealtimeService {
   // Real-time message stream from Realtime Database with limit
   static Stream<List<Message>> getMessagesStreamLimited(
       String chatId, String chatType, int limit,
-      {String? currentUserId, String? otherUserId}) {
+      {String? currentUserId, String? otherUserId, bool? attendanceGroup}) {
     final firebaseChatId = ChatUtils.generateChatId(chatId,
         currentUserId: currentUserId,
         otherUserId: otherUserId,
-        chatType: chatType);
+        chatType: chatType,
+        attendanceGroup: attendanceGroup);
 
+    debugPrint("✅ Loaded 6 cached messages for $firebaseChatId");
     return database
         .ref('chats/$firebaseChatId/messages')
         .orderByChild('timestamp')
@@ -225,6 +219,7 @@ class FirebaseRealtimeService {
                         messageData['timestamp'])
                     .toIso8601String();
               }
+              debugPrint("✅ Loaded 6 cached messages for messageData $messageData");
               messages.add(Message.fromJson(messageData));
             }
           } catch (e) {
@@ -252,11 +247,13 @@ class FirebaseRealtimeService {
     int limit, {
     String? currentUserId,
     String? otherUserId,
+    bool? attendanceGroup,
   }) async {
     final firebaseChatId = ChatUtils.generateChatId(chatId,
         currentUserId: currentUserId,
         otherUserId: otherUserId,
-        chatType: chatType);
+        chatType: chatType,
+        attendanceGroup: attendanceGroup);
 
     try {
       final snapshot =
@@ -302,11 +299,12 @@ class FirebaseRealtimeService {
 
   // Real-time message stream from Realtime Database
   static Stream<List<Message>> getMessagesStream(String chatId, String chatType,
-      {String? currentUserId, String? otherUserId}) {
+      {String? currentUserId, String? otherUserId, bool? attendanceGroup}) {
     final firebaseChatId = ChatUtils.generateChatId(chatId,
         currentUserId: currentUserId,
         otherUserId: otherUserId,
-        chatType: chatType);
+        chatType: chatType,
+        attendanceGroup: attendanceGroup);
 
     return database.ref('chats/$firebaseChatId/messages').onValue.map((event) {
       final data = event.snapshot.value;
@@ -355,11 +353,12 @@ class FirebaseRealtimeService {
   // Real-time message stream from Realtime Database
   static Stream<List<Message>> getMessagesStreamSingle(
       String chatId, String chatType,
-      {String? currentUserId, String? otherUserId}) {
+      {String? currentUserId, String? otherUserId, bool? attendanceGroup}) {
     final firebaseChatId = ChatUtils.generateChatId(chatId,
         currentUserId: currentUserId,
         otherUserId: otherUserId,
-        chatType: chatType);
+        chatType: chatType,
+        attendanceGroup: attendanceGroup);
 
     return database.ref('chats/$firebaseChatId/messages').onValue.map((event) {
       final data = event.snapshot.value;
@@ -399,12 +398,14 @@ class FirebaseRealtimeService {
     String? currentUserId,
     String? otherUserId,
     List<dynamic>? groupMembers,
+    bool? attendanceGroup,
   }) async {
     try {
       final firebaseChatId = ChatUtils.generateChatId(chatId,
           chatType: chatType,
           currentUserId: currentUserId,
-          otherUserId: otherUserId);
+          otherUserId: otherUserId,
+          attendanceGroup: attendanceGroup);
 
       await database
           .ref('chats/$firebaseChatId/messages/$messageId/status/$userId')
@@ -452,13 +453,15 @@ class FirebaseRealtimeService {
       String chatType, String chatId, String userId,
       {String? currentUserId,
       String? otherUserId,
-      List<dynamic>? groupMembers}) async {
+      List<dynamic>? groupMembers,
+      bool? attendanceGroup}) async {
     try {
 
       final firebaseChatId = ChatUtils.generateChatId(chatId,
           chatType: chatType,
           currentUserId: currentUserId,
-          otherUserId: otherUserId);
+          otherUserId: otherUserId,
+          attendanceGroup: attendanceGroup);
 
       final messagesSnapshot =
           await database.ref('chats/$firebaseChatId/messages').get();
@@ -563,12 +566,13 @@ class FirebaseRealtimeService {
   // Typing indicator
   static Future<void> setTyping(
       String chatType, String chatId, String userId, bool isTyping,
-      {String? currentUserId, String? otherUserId}) async {
+      {String? currentUserId, String? otherUserId, bool? attendanceGroup}) async {
     debugPrint("setTyping $chatId $userId $isTyping");
     final firebaseChatId = ChatUtils.generateChatId(chatId,
         chatType: chatType,
         currentUserId: currentUserId,
-        otherUserId: otherUserId);
+        otherUserId: otherUserId,
+        attendanceGroup: attendanceGroup);
     debugPrint("setTyping $firebaseChatId $userId $isTyping");
     if (isTyping) {
       await database.ref('typing/$firebaseChatId/$userId').set({
@@ -587,13 +591,14 @@ class FirebaseRealtimeService {
 
   static Stream<Map<String, dynamic>> getTypingUsers(
       String chatId, String chatType,
-      {String? currentUserId, String? otherUserId}) {
+      {String? currentUserId, String? otherUserId, bool? attendanceGroup}) {
     debugPrint(' getTypingUsers Listening to Firebase chat ID: $otherUserId');
     var firebaseChatId = ChatUtils.generateChatId(
         chatType != 'group' ? otherUserId! : chatId,
         chatType: chatType,
         currentUserId: currentUserId,
-        otherUserId: otherUserId);
+        otherUserId: otherUserId,
+        attendanceGroup: attendanceGroup);
     debugPrint(
         ' getTypingUsers Listening to Firebase chat ID: $firebaseChatId');
     // firebaseChatId = 'private_4';

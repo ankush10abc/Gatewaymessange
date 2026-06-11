@@ -1,3 +1,4 @@
+import 'package:flutter/cupertino.dart';
 import 'package:hive/hive.dart';
 import 'chat_hive_model_adapter.dart';
 
@@ -99,7 +100,7 @@ class ChatHiveModel extends HiveObject {
     final sortTime = json['sort_time'] != null
         ? DateTime.tryParse(json['sort_time'])
         : lastMsgTime;
-    
+    debugPrint("💬 Upserted chat:attendanceGroup ${json['attendance_group']}");
     return ChatHiveModel(
       id: json['id'].toString(),
       type: json['type'] ?? 'user',
@@ -206,6 +207,7 @@ class ChatHiveModel extends HiveObject {
   }
 
   String getUniqueKey() {
-    return '${type}_$id';
+    debugPrint("💬 Upserted chat:attendanceGroup ${attendanceGroup == false ? '${type}_$id' :  '${type}_$id$attendanceGroup'}");
+    return attendanceGroup == false ? '${type}_$id' :  '${type}_$id$attendanceGroup';
   }
 }

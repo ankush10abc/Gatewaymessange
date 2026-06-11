@@ -17,7 +17,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:scroll_to_index/scroll_to_index.dart';
 
-import '../../app/theme/app_theme.dart';
 import '../../core/models/chat_model.dart';
 import '../../core/models/message_model.dart';
 import '../../core/services/api_service_simple.dart';
@@ -109,10 +108,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    
+
     // Track this chat as active
     ActiveChatTracker.setActiveChat(widget.chatId);
-    
+
     final dio = Dio();
     _apiService = ApiService(dio);
     _initializeFirebase();
@@ -122,21 +121,22 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ApiService.setContext(context);
       _isAttendanceGroup = widget.attendance_group;
-      _initializeChat();
       getUserRole();
+      _initializeChat();
       _handleInitialMessage();
     });
   }
+
   var userRole;
   String? _userRoleCache; // Cache user role to avoid repeated lookups
-  
-  void getUserRole(){
+
+  void getUserRole() {
     final user = ref.read(authProvider).user;
-    debugPrint("AnkushuserRole ${user!.toJson()}");
-    if (user == null) return ;
+    if (user == null) return;
+    debugPrint("AnkushuserRole ${user.toJson()}");
     // Ankush revert
     userRole = user.actual_role.toLowerCase();
-    if(userRole == 'no user'){
+    if (userRole == 'no user') {
       userRole = user.role.toLowerCase();
     }
     _userRoleCache = userRole; // Cache the role
@@ -173,10 +173,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    
+
     // Clear active chat tracking
     ActiveChatTracker.clearActiveChat();
-    
+
     // Stop background sync
     _syncService.stopBackgroundSync(
       widget.chatId,
@@ -185,7 +185,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       userRole: _userRoleCache,
       isAttendanceGroup: _isAttendanceGroup,
     );
-    
+
     // Cancel message sync service listeners
     _syncService.cancelFirebaseListener(
       widget.chatId,
@@ -194,7 +194,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       userRole: _userRoleCache,
       isAttendanceGroup: _isAttendanceGroup,
     );
-    
+
+    _cacheSubscription?.cancel();
     _messagesSubscription?.cancel();
     _typingSubscription?.cancel();
     _presenceSubscription?.cancel();
@@ -208,7 +209,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       try {
         FirebaseRealtimeService.setUserOffline(_currentUserId!);
         FirebaseRealtimeService.setTyping(
-            widget.chatType, widget.chatId, _currentUserId!, false);
+            widget.chatType, widget.chatId, _currentUserId!, false,
+            attendanceGroup: _isAttendanceGroup);
       } catch (e) {
         // Ignore Firebase errors during disposal
       }
@@ -229,7 +231,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       case AppLifecycleState.inactive:
         FirebaseRealtimeService.setUserOffline(_currentUserId!);
         FirebaseRealtimeService.setTyping(
-            widget.chatType, widget.chatId, _currentUserId!, false);
+            widget.chatType, widget.chatId, _currentUserId!, false,
+            attendanceGroup: _isAttendanceGroup);
         break;
       default:
         break;
@@ -261,7 +264,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       await FirebaseRealtimeService.setUserOnline(user.id);
       await _loadInitialMessages();
 
-      debugPrint("🔥 _setupRealtimeListeners check: attendance_group=$_isAttendanceGroup");
+      debugPrint(
+          "🔥 _setupRealtimeListeners check: attendance_group=$_isAttendanceGroup");
       // Setup Firebase listeners for non-attendance groups
       // Attendance group flag is now set in _loadInitialMessages()
       if (_isAttendanceGroup != true) {
@@ -271,7 +275,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         debugPrint("⏭️ Skipping Firebase listeners for attendance group");
       }
 
-      
       // Start background sync for API (every 30 seconds)
       _syncService.startBackgroundSync(
         chatId: widget.chatId,
@@ -280,7 +283,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         currentUserId: _currentUserId,
         userRole: _userRoleCache,
         isAttendanceGroup: _isAttendanceGroup,
-        otherUserId: widget.chatType != 'group' ? (_user != null ? _user!['id']?.toString() : null) : null,
+        otherUserId: _firebaseOtherUserId,
       );
 
       ref.read(chatProvider.notifier).resetUnreadCount(widget.chatId);
@@ -289,14 +292,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         if (mounted) {
           FirebaseRealtimeService.markMessagesAsRead(
               widget.chatType, widget.chatId, user.id,
+              currentUserId: _currentUserId,
+              otherUserId: _firebaseOtherUserId,
+              attendanceGroup: _isAttendanceGroup,
               groupMembers: widget.chatType == 'group' && _user != null
                   ? _user!['member_list']
                   : null);
-          
+
           // Update chat list to reset unread count
           ChatListUpdateService.updateOnMessageReceived(
             chatId: widget.chatId,
             chatType: widget.chatType,
+            attendanceGroup: widget.attendance_group ?? false,
             lastMessage: _messages.isNotEmpty ? _messages.first.text : '',
             incrementUnread: false,
           );
@@ -329,7 +336,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
     try {
       final nextPage = pageCount + 1;
-      
+
       final olderMessages = await _syncService.loadMoreMessages(
         chatId: widget.chatId,
         chatType: widget.chatType,
@@ -348,7 +355,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           pageCount = nextPage;
           _isLoadingOldMessages = false;
         });
-        debugPrint('✅ Loaded page $nextPage with ${olderMessages.length} messages');
+        debugPrint(
+            '✅ Loaded page $nextPage with ${olderMessages.length} messages');
       }
     } catch (e) {
       if (mounted) {
@@ -356,97 +364,98 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           _isLoadingOldMessages = false;
         });
         ScaffoldMessenger.of(context).showSnackBar(
-           SnackBar(content: Text('Failed to load old messages: $e')),
+          SnackBar(content: Text('Failed to load old messages: $e')),
         );
       }
     }
   }
 
+  String? get _firebaseOtherUserId {
+    if (widget.chatType == 'group') return '0';
+
+    final userId = _user?['id']?.toString();
+    if (userId != null && userId.isNotEmpty && userId != 'null') {
+      return userId;
+    }
+
+    return widget.chatId;
+  }
+
+  void _hydrateChatMetadataFromRoute() {
+    _isAttendanceGroup ??= widget.attendance_group;
+    _user ??= {
+      'id': widget.chatId,
+      'name': widget.chatName,
+      'attendance_group': _isAttendanceGroup,
+      if (widget.chatType == 'group') 'member_list': <dynamic>[],
+    };
+  }
+
+  void _setupCacheWatcher() {
+    _cacheSubscription?.cancel();
+    _cacheSubscription = _syncService
+        .watchMessages(
+      widget.chatId,
+      widget.chatType,
+      currentUserId: _currentUserId,
+      userRole: _userRoleCache,
+      isAttendanceGroup: _isAttendanceGroup,
+    )
+        .listen((cachedMessages) {
+      if (!mounted) return;
+      if (cachedMessages.isEmpty && _messages.isNotEmpty) return;
+
+      setState(() {
+        _messages = _messages.isEmpty
+            ? cachedMessages
+            : _mergeMessages(_messages, cachedMessages);
+        _isLoadingPermissions = false;
+      });
+    }, onError: (error) {
+      debugPrint('Message cache watch error: $error');
+    });
+  }
+
   Future<void> _loadInitialMessages() async {
     try {
-      final id = int.parse(widget.chatId);
-      
-      // ALWAYS load user data first to know attendance status
-      if (widget.chatType == 'group') {
-        final response = await _apiService.getGroupMessages(id, 1, ApiService.messageCount);
-        if (mounted) {
-          _user = Map<String, dynamic>.from(response.user);
-          _isAttendanceGroup = _user?['attendance_group'] == true;
-          debugPrint('📊 Loaded user data - Attendance: $_isAttendanceGroup');
-          
-          // For attendance groups, ALWAYS use API data directly
-          if (_isAttendanceGroup == true) {
-            final messages = response.data;
-            messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-            setState(() {
-              _messages = messages;
-              _isLoadingPermissions = false;
-            });
-            debugPrint('✅ Attendance group: loaded ${messages.length} messages from API');
-            return;
-          }
-        }
-      } else {
-        final response = await _apiService.getConversation(id, 1, 1);
-        if (mounted) {
-          _user = Map<String, dynamic>.from(response.user);
-          _isAttendanceGroup = _user?['attendance_group'] == true;
-        }
-      }
-      
-      // For NON-attendance groups: use cache + Firebase sync
+      _hydrateChatMetadataFromRoute();
+      _setupCacheWatcher();
+
+      if (widget.attendance_group == false) {
+
+
       final cachedMessages = await _syncService.getCachedMessages(
         widget.chatId,
         widget.chatType,
         currentUserId: _currentUserId,
         userRole: _userRoleCache,
-        isAttendanceGroup: _isAttendanceGroup,
+        isAttendanceGroup: widget.attendance_group,
       );
-      
-      if (cachedMessages.isNotEmpty) {
-        debugPrint('⚡ Loaded ${cachedMessages.length} messages from cache');
-        if (mounted) {
-          setState(() {
+
+      if (mounted) {
+        setState(() {
+          if (cachedMessages.isNotEmpty) {
             _messages = cachedMessages;
-            _isLoadingPermissions = false;
-          });
-        }
+          }
+          _isLoadingPermissions = false;
+        });
       }
-      
-      final hasCached = await _syncService.hasCachedMessages(
-        widget.chatId,
-        widget.chatType,
-        currentUserId: _currentUserId,
-        userRole: _userRoleCache,
-        isAttendanceGroup: _isAttendanceGroup,
-      );
-      
-      if (!hasCached) {
-        debugPrint('🌐 First time - loading from API');
-        final result = await _syncService.loadMessagesFromApi(
-          chatId: widget.chatId,
-          chatType: widget.chatType,
-          apiService: _apiService,
-          currentUserId: _currentUserId,
-          userRole: _userRoleCache,
-          isAttendanceGroup: _isAttendanceGroup,
-        );
-        
-        if (mounted) {
-          final messages = result['messages'] as List<Message>;
-          setState(() {
-            _messages = messages;
-            _isLoadingPermissions = false;
-          });
-          debugPrint('✅ API loaded ${messages.length} messages');
-        }
+
+      debugPrint('⚡ Chat opened with ${cachedMessages.length} cached messages');
+
+      if (_isAttendanceGroup == true) {
+        unawaited(_loadConversationMetadataFromApi(
+          shouldLoadAttendanceMessages: true,
+        ));
       } else {
-        if (mounted) {
-          setState(() {
-            _isLoadingPermissions = false;
-          });
-        }
+        _warmRecentMessagesInBackground(
+          shouldFallbackToApiMessages: cachedMessages.isEmpty,
+        );
+        unawaited(_loadConversationMetadataFromApi(
+          shouldFallbackToApiMessages: false,
+        ));
       }
+    }
     } catch (e) {
       debugPrint('❌ Load initial messages error: $e');
       if (mounted) {
@@ -457,51 +466,146 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     }
   }
 
+  void _warmRecentMessagesInBackground({
+    required bool shouldFallbackToApiMessages,
+  }) {
+    unawaited(() async {
+      final firebaseMessages = await _syncService.syncRecentFirebaseMessages(
+        chatId: widget.chatId,
+        chatType: widget.chatType,
+        currentUserId: _currentUserId,
+        userRole: _userRoleCache,
+        isAttendanceGroup: widget.attendance_group,
+        otherUserId: _firebaseOtherUserId,
+        limit: ApiService.messageCount,
+      );
+
+      if (!mounted ||
+          !shouldFallbackToApiMessages ||
+          firebaseMessages.isNotEmpty) {
+        return;
+      }
+
+      await _loadConversationMetadataFromApi(
+        shouldFallbackToApiMessages: true,
+      );
+    }());
+  }
+
+  Future<void> _loadConversationMetadataFromApi({
+    bool shouldLoadAttendanceMessages = false,
+    bool shouldFallbackToApiMessages = false,
+  }) async {
+    final hasInternet = await InternetChecker.hasInternet();
+    if (!hasInternet) return;
+
+    try {
+      final id = int.parse(widget.chatId);
+      final limit = shouldLoadAttendanceMessages || shouldFallbackToApiMessages
+          ? ApiService.messageCount
+          : 1;
+
+      Map<String, dynamic>? userData;
+      List<Message> messages = [];
+
+      if (widget.chatType == 'group') {
+        final response = await _apiService.getGroupMessages(id, 1, limit);
+        userData = Map<String, dynamic>.from(response.user);
+        messages = response.data;
+      } else {
+        final response = await _apiService.getConversation(id, 1, limit);
+        userData = Map<String, dynamic>.from(response.user);
+        messages = response.data;
+      }
+
+      if (!mounted) return;
+
+      final attendanceValue = userData['attendance_group'];
+      final isAttendance = attendanceValue == true ||
+          attendanceValue == 1 ||
+          attendanceValue?.toString().toLowerCase() == 'true';
+      final previousAttendanceGroup = _isAttendanceGroup;
+
+      setState(() {
+        _user = userData;
+        _isAttendanceGroup = isAttendance;
+      });
+
+      if (previousAttendanceGroup != _isAttendanceGroup) {
+        _setupCacheWatcher();
+      }
+
+      if ((shouldLoadAttendanceMessages || shouldFallbackToApiMessages) &&
+          messages.isNotEmpty) {
+        messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+        await _syncService.saveMessagesToCache(
+          chatId: widget.chatId,
+          chatType: widget.chatType,
+          messages: messages,
+          currentUserId: _currentUserId,
+          userRole: _userRoleCache,
+          isAttendanceGroup: _isAttendanceGroup,
+          append: true,
+        );
+
+        if (mounted) {
+          setState(() {
+            _messages = messages;
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('❌ Conversation metadata load failed: $e');
+    }
+  }
+
   void _setupRealtimeListeners() {
     if (_currentUserId == null) return;
 
-    _messagesSubscription = FirebaseRealtimeService.getMessagesStreamLimited(
-            widget.chatId, widget.chatType, _messagesPerPage,
-            currentUserId: _currentUserId,
-            otherUserId: widget.chatType != 'group'
-                ? _user != null
-                    ? _user!['id']?.toString()
-                    : null
-                : '0')
-        .listen((realtimeMessages) {
-      if (realtimeMessages.isNotEmpty && mounted) {
-        final previousLength = _messages.length;
-        setState(() {
-          // Use cached _isAttendanceGroup flag for consistency
-          if (_isAttendanceGroup == true) {
-            _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-          } else {
-            _messages = _mergeMessages(_messages, realtimeMessages);
+    _messagesSubscription = _syncService.setupFirebaseListener(
+        chatId: widget.chatId,
+        chatType: widget.chatType,
+        currentUserId: _currentUserId,
+        userRole: _userRoleCache,
+        isAttendanceGroup: _isAttendanceGroup,
+        otherUserId: _firebaseOtherUserId,
+        onMessages: (realtimeMessages) {
+          debugPrint("AnkushrealtimeMessages ${realtimeMessages.first}");
+          if (realtimeMessages.isNotEmpty && mounted) {
+            final previousLength = _messages.length;
+            setState(() {
+              // Use cached _isAttendanceGroup flag for consistency
+              if (_isAttendanceGroup == true) {
+                _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+              } else {
+                _messages = _mergeMessages(_messages, realtimeMessages);
+              }
+            });
+
+            if (_messages.length > previousLength &&
+                realtimeMessages.isNotEmpty) {
+              final newMessage = realtimeMessages.first;
+              if (newMessage.senderId != _currentUserId) {
+                ref.read(chatProvider.notifier).onMessageReceived(
+                      widget.chatId,
+                      widget.chatType,
+                      newMessage,
+                      true,
+                    );
+              }
+            }
+
+            if (_isAtBottom && _messages.length > previousLength) {
+              Future.delayed(
+                  const Duration(milliseconds: 100), _scrollToBottom);
+            }
           }
         });
 
-        if (_messages.length > previousLength && realtimeMessages.isNotEmpty) {
-          final newMessage = realtimeMessages.first;
-          if (newMessage.senderId != _currentUserId) {
-            ref.read(chatProvider.notifier).onMessageReceived(
-              widget.chatId,
-              widget.chatType,
-              newMessage,
-              true,
-            );
-          }
-        }
-
-        if (_isAtBottom && _messages.length > previousLength) {
-          Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
-        }
-      }
-    }, onError: (error) {
-      debugPrint('Messages stream error: $error');
-    });
-
     _typingSubscription = FirebaseRealtimeService.getTypingUsers(
             widget.chatId, widget.chatType,
+            currentUserId: _currentUserId,
+            attendanceGroup: _isAttendanceGroup,
             otherUserId: _currentUserId)
         .listen((typingData) {
       if (mounted) {
@@ -543,22 +647,23 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     if (widget.chatType != 'group' || _user == null) return true;
 
     final user = ref.read(authProvider).user;
-    debugPrint("AnkushuserRole ${user!.toJson()}");
     if (user == null) return false;
+    debugPrint("AnkushuserRole ${user.toJson()}");
     // Ankush revert
     var userRole = user.actual_role.toLowerCase();
-    if(userRole == 'no user'){
+    if (userRole == 'no user') {
       userRole = user.role.toLowerCase();
     }
     final isLocked = _user!['is_locked'] == true;
     final messagePermission =
         _user!['message_permission']?.toString().toLowerCase();
 
-    debugPrint("AnkushuserRole _canSendMessage messagePermission ${messagePermission} isLocked $isLocked  userRole $userRole");
+    debugPrint(
+        "AnkushuserRole _canSendMessage messagePermission ${messagePermission} isLocked $isLocked  userRole $userRole");
     if (isLocked) {
       return userRole == 'admin';
     }
-  debugPrint("AnkushuserRole $userRole");
+    debugPrint("AnkushuserRole $userRole");
     switch (messagePermission) {
       case 'admin_only':
         return userRole == 'admin';
@@ -661,7 +766,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
     try {
       final oldestMessage = _messages.last;
-      
+
       // First try to load from Firebase and sync to cache
       final olderMessages = await _syncService.syncOlderFirebaseMessages(
         chatId: widget.chatId,
@@ -670,13 +775,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         currentUserId: _currentUserId,
         userRole: _userRoleCache,
         isAttendanceGroup: _isAttendanceGroup,
-        otherUserId: widget.chatType != 'group' ? _user!['id']?.toString() : '0',
+        otherUserId: _firebaseOtherUserId,
         limit: _messagesPerPage,
       );
 
       if (mounted) {
         setState(() {
-          debugPrint("ERRORmsgData success olderMessages ${olderMessages.length}");
+          debugPrint(
+              "ERRORmsgData success olderMessages ${olderMessages.length}");
           if (olderMessages.length < _messagesPerPage) {
             _hasMoreMessages = false;
           }
@@ -705,9 +811,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   void _markMessageAsRead(Message message) {
     final firebaseId = message.firebaseId ?? message.id;
     // Use cached _isAttendanceGroup flag
-    final msgId = _isAttendanceGroup == true
-        ? message.id
-        : message.msgId;
+    final msgId = _isAttendanceGroup == true ? message.id : message.msgId;
     final currentStatus = message.status[_currentUserId] ?? 'sent';
 
     // Update Firebase status
@@ -715,18 +819,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         !firebaseId.startsWith('temp_') &&
         currentStatus != 'read') {
       FirebaseRealtimeService.updateMessageStatus(
-          widget.chatType,
-          widget.chatId,
-          firebaseId,
-          _currentUserId!,
-          'read',
+          widget.chatType, widget.chatId, firebaseId, _currentUserId!, 'read',
           currentUserId: _currentUserId,
-          otherUserId:
-              widget.chatType != 'group' ? _user!['id']?.toString() : null,
+          otherUserId: _firebaseOtherUserId,
+          attendanceGroup: _isAttendanceGroup,
           groupMembers: widget.chatType == 'group' && _user != null
               ? _user!['member_list']
               : null);
-      
+
       // Update message status in local cache
       _syncService.updateMessageInCache(
         widget.chatId,
@@ -745,7 +845,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     }
 
     // Call API to mark message as read (limit to 2 calls)
-    if (_markAsReadApiCallCount < 2 && msgId != null && msgId.isNotEmpty && msgId != '0') {
+    if (_markAsReadApiCallCount < 2 &&
+        msgId != null &&
+        msgId.isNotEmpty &&
+        msgId != '0') {
       try {
         final messageId = int.parse(msgId);
         if (messageId > 0) {
@@ -819,12 +922,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
     setState(() {
       debugPrint("results $results");
-      if(results == null || results.length == 0){
-
+      if (results.isEmpty) {
         // _currentSearchIndex = 0;
         _highlightedMessageId = null;
       }
-
     });
     if (mounted) {
       setState(() {
@@ -910,6 +1011,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     await _scrollToMessage(targetMessage);
   }
 
+  Future<bool> _ensureInternetForSend() async {
+    final hasInternet = await InternetChecker.hasInternet();
+    if (!hasInternet && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Internet connection is required to send messages'),
+        ),
+      );
+    }
+    return hasInternet;
+  }
+
   Future<void> _sendMessage({
     String? text,
     String type = 'text',
@@ -922,10 +1035,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     final messageText = text ?? fileName ?? '';
     if (messageText.trim().isEmpty && type == 'text') return;
 
-    final hasInternet = await InternetChecker.hasInternet();
-    if (!hasInternet) {
-      return;
-    }
+    if (!await _ensureInternetForSend()) return;
 
     final tempId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
     final user = ref.read(authProvider).user!;
@@ -952,7 +1062,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         _replyToMessage = null;
       });
     }
-    
+
     // Cache message immediately
     await _syncService.addMessageToCache(
       widget.chatId,
@@ -965,35 +1075,57 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
     _messageController.clear();
     FirebaseRealtimeService.setTyping(
-        widget.chatType, widget.chatId, _currentUserId!, false);
+        widget.chatType, widget.chatId, _currentUserId!, false,
+        attendanceGroup: _isAttendanceGroup);
     _scrollToBottom();
 
     try {
-      await _sendToAPI(message);
-      
-      ref.read(chatProvider.notifier).onMessageSent(
+      final sentMessage = await _sendToAPI(message);
+      await _syncService.replaceMessageInCache(
         widget.chatId,
         widget.chatType,
-        message,
+        tempId,
+        sentMessage,
+        currentUserId: _currentUserId,
+        userRole: _userRoleCache,
+        isAttendanceGroup: _isAttendanceGroup,
       );
-      
+
+      if (mounted) {
+        setState(() {
+          _messages = _mergeMessages(
+            _messages.where((item) => item.id != tempId).toList(),
+            [sentMessage],
+          );
+        });
+      }
+
+      ref.read(chatProvider.notifier).onMessageSent(
+            widget.chatId,
+            widget.chatType,
+            sentMessage,
+          );
+
       // Update chat list via service
       ChatListUpdateService.updateOnMessageSent(
         chatId: widget.chatId,
         chatType: widget.chatType,
+        attendanceGroup: widget.attendance_group ?? false,
         lastMessage: messageText,
         senderId: _currentUserId,
         senderName: user.name,
       );
     } catch (e) {
       _updateMessageStatus(tempId, 'failed');
-      
+
       // Update failed status in cache
       await _syncService.updateMessageInCache(
         widget.chatId,
         widget.chatType,
         tempId,
-        {'status': {'default': 'failed'}},
+        {
+          'status': {'default': 'failed'}
+        },
         currentUserId: _currentUserId,
         userRole: _userRoleCache,
         isAttendanceGroup: _isAttendanceGroup,
@@ -1001,20 +1133,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     }
   }
 
-  Future<void> _sendToAPI(Message message) async {
+  Future<Message> _sendToAPI(Message message) async {
     try {
       // First send to Firebase
       debugPrint(
-          "Ankush api/message/save - check otherId ${widget.chatType != 'group' ? _user!['id']?.toString() ?? '0' : '0'}");
+          "Ankush api/message/save - check otherId ${_firebaseOtherUserId ?? '0'}");
       debugPrint('Ankush api/message/save - check currentid $_currentUserId');
       String? firebaseKey;
       try {
         firebaseKey = await FirebaseRealtimeService.sendMessage(message,
             chatType: widget.chatType,
             currentUserId: _currentUserId,
-            otherUserId: widget.chatType != 'group'
-                ? _user!['id']?.toString() ?? '0'
-                : '0');
+            attendanceGroup: _isAttendanceGroup,
+            otherUserId: _firebaseOtherUserId);
       } catch (e) {
         debugPrint('Ankush api/message/save - check  Error$e');
         print(e);
@@ -1052,11 +1183,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       await FirebaseRealtimeService.updateMessage(message,
           chatType: widget.chatType,
           currentUserId: _currentUserId,
-          otherUserId: widget.chatType != 'group'
-              ? _user!['id']?.toString() ?? '0'
-              : '0',
+          otherUserId: _firebaseOtherUserId,
+          attendanceGroup: _isAttendanceGroup,
           chatIdServer: msg.id.toString(),
           key: firebaseKey);
+
+      return msg.copyWith(
+        chatId: widget.chatId,
+        firebaseId: firebaseKey,
+        status: {'default': 'sent'},
+        replyToMessage: message.replyToMessage,
+      );
     } catch (e) {
       debugPrint('Ankush /save $e ${message.toJson()}');
       rethrow;
@@ -1080,6 +1217,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   Future<void> _handleFileSelection(File file, String messageType) async {
     try {
+      if (!await _ensureInternetForSend()) return;
       final uploadResponse = await _apiService.uploadFile(file, messageType);
 
       await _sendMessage(
@@ -1099,6 +1237,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   Future<void> _handleImageSelection(File file) async {
     try {
+      if (!await _ensureInternetForSend()) return;
       setState(() {
         // Show loading state if needed
       });
@@ -1200,6 +1339,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   Future<void> _handleVideoSelection(File file) async {
     try {
+      if (!await _ensureInternetForSend()) return;
       final uploadResponse = await _apiService.uploadFile(file, 'video');
       await _sendMessage(
         type: 'video',
@@ -1218,6 +1358,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   Future<void> _handleDocumentSelection(File file) async {
     try {
+      if (!await _ensureInternetForSend()) return;
       final extension = file.path.split('.').last.toLowerCase();
       final messageType = extension == 'pdf' ? 'pdf' : 'doc';
       final uploadResponse = await _apiService.uploadFile(file, messageType);
@@ -1371,7 +1512,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                   color: Colors.blue,
                   onTap: () async {
                     Navigator.pop(sheetContext);
-                    final granted = await _requestMediaPermission(forVideo: false);
+                    final granted =
+                        await _requestMediaPermission(forVideo: false);
                     if (!granted) return;
                     final List<XFile> images =
                         await ImagePicker().pickMultiImage();
@@ -1387,7 +1529,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                   color: Colors.orange,
                   onTap: () async {
                     Navigator.pop(sheetContext);
-                    final granted = await _requestMediaPermission(forVideo: true);
+                    final granted =
+                        await _requestMediaPermission(forVideo: true);
                     if (!granted) return;
                     final XFile? video = await ImagePicker()
                         .pickVideo(source: ImageSource.gallery);
@@ -1525,30 +1668,38 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   }
 
   Future<void> _downloadFile(Message message) async {
-    // Android <29 needs READ/WRITE_EXTERNAL_STORAGE; API 29+ uses scoped storage.
+    debugPrint(
+        '📄 Download started for: ${message.fileName}, type: ${message.type}');
+
+    // Check storage permission for Android
     if (Platform.isAndroid) {
       final sdkInt = (await DeviceInfoPlugin().androidInfo).version.sdkInt;
+      debugPrint('📱 Android SDK: $sdkInt');
+
+      // Android <29 (Android 9 and below) needs storage permission
       if (sdkInt < 29) {
         final status = await Permission.storage.request();
         if (!status.isGranted) {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Storage permission denied.')),
+              const SnackBar(
+                content:
+                    Text('Storage permission is required to download files'),
+                duration: Duration(seconds: 3),
+              ),
             );
           }
           return;
         }
       }
-      // API 29+ (Android 10, 11, 12, 13, 14+): no storage permission needed.
-      // Writing to public Download via direct path is BLOCKED on Android 14.
-      // Use app-specific external or documents directory instead.
+      // Android 29+ (10, 11, 12, 13, 14+) uses scoped storage - no permission needed
     }
 
     final fileUrl = message.fileUrl ?? message.file_path ?? '';
     if (fileUrl.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('No file URL available')),
+          const SnackBar(content: Text('File URL not available')),
         );
       }
       return;
@@ -1558,16 +1709,51 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         ? fileUrl
         : '${ApiService.baseUrl}/storage/$fileUrl';
 
-    // Ensure filename has correct extension
+    debugPrint('🔗 Full URL: $fullUrl');
+
+    // Get proper filename with correct extension
     String fileName =
         message.fileName ?? 'file_${DateTime.now().millisecondsSinceEpoch}';
-    if (message.type == 'pdf' && !fileName.toLowerCase().endsWith('.pdf')) {
-      fileName = '$fileName.pdf';
+
+    // Ensure correct file extension based on message type
+    final lowerFileName = fileName.toLowerCase();
+    switch (message.type) {
+      case 'pdf':
+        if (!lowerFileName.endsWith('.pdf')) {
+          fileName = '$fileName.pdf';
+        }
+        break;
+      case 'doc':
+        if (!lowerFileName.endsWith('.doc') &&
+            !lowerFileName.endsWith('.docx')) {
+          fileName = '$fileName.doc';
+        }
+        break;
+      case 'docx':
+        if (!lowerFileName.endsWith('.docx')) {
+          fileName = '$fileName.docx';
+        }
+        break;
+      case 'image':
+        if (!lowerFileName.endsWith('.jpg') &&
+            !lowerFileName.endsWith('.jpeg') &&
+            !lowerFileName.endsWith('.png') &&
+            !lowerFileName.endsWith('.gif')) {
+          fileName = '$fileName.jpg';
+        }
+        break;
+      case 'video':
+        if (!lowerFileName.endsWith('.mp4') &&
+            !lowerFileName.endsWith('.mov') &&
+            !lowerFileName.endsWith('.avi')) {
+          fileName = '$fileName.mp4';
+        }
+        break;
     }
 
-    // Use app-specific external files dir (writable on ALL Android versions
-    // including Android 14 without any permission).
-    // Falls back to app documents dir if external storage is unavailable.
+    debugPrint('📝 File name: $fileName');
+
+    // Use app-specific external directory (works on ALL Android versions without permission)
     Directory saveDir;
     if (Platform.isAndroid) {
       final extDir = await getExternalStorageDirectory();
@@ -1577,53 +1763,105 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     }
 
     final filePath = '${saveDir.path}/$fileName';
+    debugPrint('📂 Save path: $filePath');
 
     // Show loading dialog
     if (!mounted) return;
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
+      builder: (_) => AlertDialog(
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            Text('Downloading $fileName...'),
+          ],
+        ),
+      ),
     );
 
     try {
-      // Use authenticated Dio instance so protected PDF URLs work
       final dio = Dio();
       final token = await _storage.getToken();
       if (token != null) {
         dio.options.headers['Authorization'] = 'Bearer $token';
       }
+      dio.options.headers['Accept'] = '*/*';
 
+      debugPrint('⬇️ Starting download...');
       await dio.download(
         fullUrl,
         filePath,
         onReceiveProgress: (received, total) {
-          // progress available if needed
+          if (total != -1) {
+            final progress = (received / total * 100).toStringAsFixed(0);
+            debugPrint('📈 Download progress: $progress%');
+          }
         },
       );
 
       if (!mounted) return;
       Navigator.of(context).pop(); // dismiss loading
 
-      // Open the file directly so user can view the PDF immediately
+      debugPrint('✅ Download complete: $filePath');
+
+      // Try to open the file
       final result = await OpenFilex.open(filePath);
-      if (result.type != ResultType.done && mounted) {
-        // No app to open it — show success with path info
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Downloaded: $fileName'),
-            action: SnackBarAction(
-              label: 'Open',
-              onPressed: () => OpenFilex.open(filePath),
+      debugPrint('📄 Open result: ${result.type}, message: ${result.message}');
+
+      if (result.type == ResultType.done) {
+        // File opened successfully
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Downloaded: $fileName'),
+              backgroundColor: Colors.green,
+              duration: const Duration(seconds: 2),
             ),
-          ),
-        );
+          );
+        }
+      } else if (result.type == ResultType.noAppToOpen) {
+        // No app to open the file
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content:
+                  Text('Downloaded: $fileName\nNo app found to open this file'),
+              action: SnackBarAction(
+                label: 'OK',
+                onPressed: () {},
+              ),
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        }
+      } else {
+        // File saved but couldn't open
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Downloaded: $fileName\nSaved to: $filePath'),
+              action: SnackBarAction(
+                label: 'Try Open',
+                onPressed: () => OpenFilex.open(filePath),
+              ),
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        }
       }
     } catch (e) {
+      debugPrint('❌ Download failed: $e');
       if (mounted) {
         Navigator.of(context).pop(); // dismiss loading
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Download failed: $e')),
+          SnackBar(
+            content: Text('Download failed: ${e.toString()}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 4),
+          ),
         );
       }
     }
@@ -1679,7 +1917,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
               icon: const Icon(Icons.arrow_back),
               onPressed: () {
                 if (Navigator.canPop(context)) {
-                  Navigator.pop(context,true);
+                  Navigator.pop(context, true);
                 } else {
                   context.go('/home');
                 }
@@ -1702,7 +1940,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                           ? _user!['member_count'] ?? 0
                           : 0,
                       isGroup: widget.chatType == 'group',
-                      isOnline: _onlineUsers[widget.chatId]?['isOnline'] ?? false,
+                      isOnline:
+                          _onlineUsers[widget.chatId]?['isOnline'] ?? false,
                       lastSeen: _onlineUsers[widget.chatId]?['lastSeen'] != null
                           ? DateTime.fromMillisecondsSinceEpoch(
                               _onlineUsers[widget.chatId]['lastSeen'])
@@ -1767,8 +2006,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                 ),
                 IconButton(
                   icon: const Icon(Icons.arrow_downward),
-                  onPressed:
-                      _searchResults.isEmpty ? null : _navigateToNextSearchResult,
+                  onPressed: _searchResults.isEmpty
+                      ? null
+                      : _navigateToNextSearchResult,
                 ),
                 IconButton(
                   icon: const Icon(Icons.close),
@@ -1793,13 +2033,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                     }
                   },
                   itemBuilder: (context) => [
-                     PopupMenuItem(
+                    PopupMenuItem(
                         value: 'search',
                         child: Row(
                           children: [
-        Icon(Icons.search, color: Theme.of(context).iconTheme.color),
+                            Icon(Icons.search,
+                                color: Theme.of(context).iconTheme.color),
                             SizedBox(width: 8),
-                            Text('Search', style: TextStyle(color: Theme.of(context).textTheme.bodyMedium?.color)),
+                            Text('Search',
+                                style: TextStyle(
+                                    color: Theme.of(context)
+                                        .textTheme
+                                        .bodyMedium
+                                        ?.color)),
                           ],
                         )),
                   ],
@@ -1857,7 +2103,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                     padding:
                         const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     child: ElevatedButton.icon(
-                      onPressed: _isLoadingOldMessages ? null : _syncOldMessages,
+                      onPressed:
+                          _isLoadingOldMessages ? null : _syncOldMessages,
                       icon: _isLoadingOldMessages
                           ? const SizedBox(
                               width: 16,
@@ -1884,7 +2131,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                         controller: _scrollController,
                         padding: const EdgeInsets.all(8),
                         reverse: true,
-                        cacheExtent: 500, // Cache more items for smoother scrolling
+                        cacheExtent:
+                            500, // Cache more items for smoother scrolling
                         itemCount:
                             _messages.length + (_isLoadingOldMessages ? 1 : 0),
                         itemBuilder: (context, index) {
@@ -1961,8 +2209,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                       width: double.infinity, // 👈 Makes button full width
                       child: ElevatedButton.icon(
                         onPressed: () async {
-
-                          if(userRole.toString().toLowerCase() != 'teacher'){
+                          if (userRole.toString().toLowerCase() != 'teacher') {
                             return;
                           }
 
@@ -1989,7 +2236,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                         style: ElevatedButton.styleFrom(
                           padding: const EdgeInsets.symmetric(
                               vertical: 16, horizontal: 8),
-                          backgroundColor:userRole.toString().toLowerCase() != 'teacher' ?  Colors.grey : Colors.green,
+                          backgroundColor:
+                              userRole.toString().toLowerCase() != 'teacher'
+                                  ? Colors.grey
+                                  : Colors.green,
                           foregroundColor: Colors.white,
                         ),
                       ),
@@ -2014,7 +2264,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                           onTypingChanged: (isTyping) {
                             if (_currentUserId != null) {
                               FirebaseRealtimeService.setTyping(widget.chatType,
-                                  widget.chatId, _currentUserId!, isTyping);
+                                  widget.chatId, _currentUserId!, isTyping,
+                                  attendanceGroup: _isAttendanceGroup);
                               if (isTyping) {
                                 _typingTimer?.cancel();
                                 _typingTimer =
@@ -2023,7 +2274,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                                       widget.chatType,
                                       widget.chatId,
                                       _currentUserId!,
-                                      false);
+                                      false,
+                                      attendanceGroup: _isAttendanceGroup);
                                 });
                               }
                             }
@@ -2711,7 +2963,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       }
     } else {
       // For private chat, check the receiver's status only
-      final otherUserId = _user!['id']?.toString();
+      final otherUserId = _firebaseOtherUserId;
       statusToCheck = message.status[otherUserId] ?? 'sent';
     }
 
@@ -2905,6 +3157,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   Future<void> _forwardMessage(Message message, List<String> chatIds) async {
     final user = ref.read(authProvider).user;
     if (user == null) return;
+    if (!await _ensureInternetForSend() || !mounted) return;
 
     showDialog(
       context: context,
@@ -2946,6 +3199,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           forwardedMessage,
           chatType: chat.type,
           currentUserId: user.id,
+          attendanceGroup: _isAttendanceGroup,
           otherUserId: chat.type != 'group' ? chatId : '0',
         );
 
@@ -2979,6 +3233,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           chatType: chat.type,
           currentUserId: user.id,
           otherUserId: chat.type != 'group' ? chatId : '0',
+          attendanceGroup: _isAttendanceGroup,
           chatIdServer: msg.id.toString(),
           key: firebaseKey,
         );

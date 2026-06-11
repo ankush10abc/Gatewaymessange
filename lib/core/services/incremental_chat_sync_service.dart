@@ -87,7 +87,8 @@ class IncrementalChatSyncService {
     try {
       final chatId = chatJson['id'].toString();
       final chatType = chatJson['type']?.toString() ?? 'user';
-      
+      final attendanceGroup = chatJson['attendance_group'] ?? false;
+
       // Download and cache profile image if available
       String? localImagePath;
       final profilePicture = chatJson['profile_picture'];
@@ -135,7 +136,7 @@ class IncrementalChatSyncService {
       // Get existing chat if updating
       ChatHiveModel? existingChat;
       if (!isNew) {
-        existingChat = _hiveDataSource.getChatById(chatId, chatType);
+        existingChat = _hiveDataSource.getChatById(chatId, chatType,attendanceGroup);
       }
 
       // Create ChatHiveModel

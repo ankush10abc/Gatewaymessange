@@ -29,7 +29,8 @@ class RealtimeChatSyncService {
         final data = event.snapshot.value;
         if (data != null && data is Map) {
           final messageData = Map<String, dynamic>.from(data);
-          final messageText = messageData['text']?.toString() ?? 
+          final attendanceGroup = false;
+          final messageText = messageData['text']?.toString() ??
                             messageData['message']?.toString() ?? 
                             'New message';
           final timestamp = messageData['timestamp'] as int?;
@@ -41,6 +42,7 @@ class RealtimeChatSyncService {
               chatId: chatId,
               chatType: 'group',
               lastMessage: messageText,
+              attendanceGroup: attendanceGroup,
               senderId: senderId,
               senderName: senderName,
               incrementUnread: true,

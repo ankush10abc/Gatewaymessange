@@ -1,10 +1,14 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../app/theme/app_theme.dart';
 import '../../shared/providers/auth_provider.dart';
 import '../../core/utils/internet_checker.dart';
+import '../../core/services/api_service_simple.dart';
+import '../../shared/widgets/update_dialog.dart';
 
 
 class LoginScreen extends ConsumerStatefulWidget {
@@ -24,6 +28,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkForUpdate();
+    });
   }
 
   @override
@@ -31,6 +38,41 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     _mobileController.dispose();
     _passwordController.dispose();
     super.dispose();
+  }
+
+  Future<void> _checkForUpdate() async {
+    try {
+      final packageInfo = await PackageInfo.fromPlatform();
+      final currentVersion = packageInfo.version;
+      
+      final apiService = ApiService(Dio());
+      final response = await apiService.checkAppVersion(currentVersion: currentVersion);
+      
+      if (response['success'] == true) {
+        final data = response['data'];
+        final updateAvailable = data['update_available'] ?? false;
+        
+        if (updateAvailable && mounted) {
+          showDialog(
+            context: context,
+            barrierDismissible: data['can_skip'] ?? true,
+            builder: (context) => UpdateDialog(
+              currentVersion: data['current_version'] ?? currentVersion,
+              latestVersion: data['latest_version'] ?? currentVersion,
+              updateType: data['update_type'] ?? 'optional',
+              releaseNotes: data['release_notes'],
+              downloadUrl: data['download_url'],
+              directApkUrl: data['direct_apk_url'],
+              apkSizeMb: data['apk_size_mb']?.toDouble(),
+              canSkip: data['can_skip'] ?? true,
+              forceUpdateMessage: data['force_update_message'],
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('❌ Update check failed: $e');
+    }
   }
 
   Future<void> _handleLogin() async {
@@ -42,36 +84,28 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
       final hasInternet = await InternetChecker.hasInternet();
       if (!hasInternet) {
-        final errorMsg = 'No internet connection';
-        setState(() {
-          _errorMessage = errorMsg;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Row(
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (context) => AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: Row(
               children: [
-                const Icon(Icons.wifi_off, color: Colors.white),
+                Icon(Icons.wifi_off, color: Colors.orange[700], size: 28),
                 const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    errorMsg,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
+                const Text('No Internet', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
               ],
             ),
-            backgroundColor: Colors.orange[700],
-            behavior: SnackBarBehavior.floating,
-            margin: const EdgeInsets.all(16),
-            duration: const Duration(seconds: 3),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+            content: const Text(
+              'Please check your internet connection and try again.',
+              style: TextStyle(fontSize: 15, color: Colors.black87),
             ),
-            elevation: 6,
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('OK', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              ),
+            ],
           ),
         );
         return;

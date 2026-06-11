@@ -5,7 +5,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:intl/intl.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import '../../core/permissions/notification_permission_helper.dart';
+import '../../core/models/chat_hive_model.dart';
 import '../../core/services/chat_list_update_service.dart';
 import '../../core/utils/internet_checker.dart';
 import '../../shared/providers/auth_provider.dart';
@@ -17,6 +19,10 @@ import '../../core/services/deep_link_service.dart';
 import '../../core/services/offline_queue_service.dart';
 import '../../core/services/firebase_message_listener.dart';
 import '../../core/services/chat_list_manager.dart';
+import '../../core/services/message_sync_service.dart';
+import '../../shared/widgets/update_dialog.dart';
+import '../../core/services/api_service_simple.dart';
+import 'package:dio/dio.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -27,7 +33,9 @@ class HomeScreen extends ConsumerStatefulWidget {
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   final TextEditingController _searchController = TextEditingController();
+  final MessageSyncService _messageSyncService = MessageSyncService();
   bool _isSearching = false;
+  String? _conversationSyncSignature;
 
   void initDeepLinks() {
     final appLinks = AppLinks();
@@ -59,6 +67,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     await InternetChecker.checkAndRedirect(context);
     initDeepLinks();
     _checkPendingDeepLink();
+    _checkForUpdate();
     try {
       NotificationPermissionHelper.request();
     } catch (e) {
@@ -69,23 +78,25 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    
+
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final user = ref.read(authProvider).user;
       if (user != null) {
         ChatListUpdateService.initialize(ref, userId: user.id);
         await ChatListManager.init(user.id);
-        await ref.read(optimizedChatProvider.notifier).initialize(userId: user.id);
+        await ref
+            .read(optimizedChatProvider.notifier)
+            .initialize(userId: user.id);
       }
       FirebaseMessageListener.init(ref);
       initUI();
     });
-    
+
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
       debugPrint('📥 Received foreground notification: ${message.data}');
       _handleIncomingMessage(message.data);
     });
-    
+
     FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
       debugPrint('🔔 Notification opened app: ${message.data}');
       _handleIncomingMessage(message.data);
@@ -94,18 +105,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   void _handleIncomingMessage(Map<String, dynamic> data) {
     try {
-      final chatId = data['chat_id']?.toString() ?? data['group_id']?.toString();
-      final chatType = data['chat_type']?.toString() ?? (data['group_id'] != null ? 'group' : 'user');
-      final messageText = data['message']?.toString() ?? data['body']?.toString() ?? 'New message';
-      
+      final chatId =
+          data['chat_id']?.toString() ?? data['group_id']?.toString();
+      final attendanceGroup = data['attendance_group'] ;
+      final chatType = data['chat_type']?.toString() ??
+          (data['group_id'] != null ? 'group' : 'user');
+      final messageText = data['message']?.toString() ??
+          data['body']?.toString() ??
+          'New message';
+
       if (chatId != null) {
         ref.read(optimizedChatProvider.notifier).updateChatWithMessage(
-          chatId: chatId,
-          chatType: chatType,
-          lastMessage: messageText,
-          lastMessageTime: DateTime.now(),
-          isIncoming: true,
-        );
+              chatId: chatId,
+              chatType: chatType,
+          attendanceGroup: attendanceGroup,
+              lastMessage: messageText,
+              lastMessageTime: DateTime.now(),
+              isIncoming: true,
+            );
         debugPrint('⬆️ Chat $chatType/$chatId updated and moved to top');
       }
     } catch (e) {
@@ -114,23 +131,63 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   void _checkPendingDeepLink() {
-    debugPrint('Deep link received:_checkPendingDeepLink ${DeepLinkService.getPendingMessage()}');
-    debugPrint('Deep link received:_checkPendingDeepLink ${DeepLinkService.hasPendingMessage()}');
+    debugPrint(
+        'Deep link received:_checkPendingDeepLink ${DeepLinkService.getPendingMessage()}');
+    debugPrint(
+        'Deep link received:_checkPendingDeepLink ${DeepLinkService.hasPendingMessage()}');
     if (DeepLinkService.hasPendingMessage()) {
       final message = DeepLinkService.getPendingMessage();
       debugPrint('Deep link received:_checkPendingDeepLink $message');
       if (message != null) {
         Future.delayed(const Duration(milliseconds: 800), () {
           if (mounted) {
-            context.push('/chat-selection?message=${Uri.encodeComponent(message)}');
+            context.push(
+                '/chat-selection?message=${Uri.encodeComponent(message)}');
           }
         });
       }
     }
   }
 
+  Future<void> _checkForUpdate() async {
+    try {
+      final packageInfo = await PackageInfo.fromPlatform();
+      final currentVersion = packageInfo.version;
+
+      final apiService = ApiService(Dio());
+      final response =
+          await apiService.checkAppVersion(currentVersion: currentVersion);
+
+      if (response['success'] == true) {
+        final data = response['data'];
+        final updateAvailable = data['update_available'] ?? false;
+
+        if (updateAvailable && mounted) {
+          showDialog(
+            context: context,
+            barrierDismissible: data['can_skip'] ?? true,
+            builder: (context) => UpdateDialog(
+              currentVersion: data['current_version'] ?? currentVersion,
+              latestVersion: data['latest_version'] ?? currentVersion,
+              updateType: data['update_type'] ?? 'optional',
+              releaseNotes: data['release_notes'],
+              downloadUrl: data['download_url'],
+              directApkUrl: data['direct_apk_url'],
+              apkSizeMb: data['apk_size_mb']?.toDouble(),
+              canSkip: data['can_skip'] ?? true,
+              forceUpdateMessage: data['force_update_message'],
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('❌ Update check failed: $e');
+    }
+  }
+
   @override
   void dispose() {
+    _messageSyncService.stopChatListFirebaseSync();
     _searchController.dispose();
     super.dispose();
   }
@@ -139,6 +196,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Widget build(BuildContext context) {
     final authState = ref.watch(authProvider);
     final chatState = ref.watch(optimizedChatProvider);
+    _scheduleConversationOfflineSync(chatState.chats);
 
     return Scaffold(
       appBar: AppBar(
@@ -196,7 +254,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     CircleAvatar(
                       radius: 12,
                       backgroundImage: authState.user?.profilePicture != null
-                          ? NetworkImage(authState.user!.profilePicture.toString().contains('https://gatewayreports.in/storage') 
+                          ? NetworkImage(authState.user!.profilePicture
+                                  .toString()
+                                  .contains('https://gatewayreports.in/storage')
                               ? authState.user!.profilePicture.toString()
                               : 'https://gatewayreports.in/storage/${authState.user!.profilePicture}')
                           : null,
@@ -245,10 +305,37 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
+  void _scheduleConversationOfflineSync(List<ChatHiveModel> chats) {
+    final user = ref.read(authProvider).user;
+    if (user == null || chats.isEmpty) return;
+
+    final actualRole = user.actual_role.toLowerCase();
+    final userRole =
+        actualRole == 'no user' ? user.role.toLowerCase() : actualRole;
+
+    final signature = chats.take(30).map((chat) {
+      final time = chat.sortTime ?? chat.lastMessageTime ?? chat.updatedAt;
+      return '${chat.type}_${chat.id}_${time.millisecondsSinceEpoch}_${chat.unreadCount}';
+    }).join('|');
+
+    final nextSignature = '${user.id}|$userRole|$signature';
+    if (_conversationSyncSignature == nextSignature) return;
+    _conversationSyncSignature = nextSignature;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _messageSyncService.startChatListFirebaseSync(
+        chats: chats,
+        currentUserId: user.id,
+        userRole: userRole,
+      );
+    });
+  }
+
   Widget _buildQueueStatusBanner() {
     final queueStats = OfflineQueueService.getQueueStats();
     final total = queueStats['total'] ?? 0;
-    
+
     if (total == 0) return const SizedBox.shrink();
 
     return Container(
@@ -303,8 +390,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
             const SizedBox(height: 24),
             Text(
-              chatState.error.toString().contains('host lookup') 
-                  ? 'Connection Issue' 
+              chatState.error.toString().contains('host lookup')
+                  ? 'Connection Issue'
                   : 'Error Loading chats',
               style: TextStyle(
                 fontSize: 20,
@@ -316,8 +403,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 32),
               child: Text(
-                chatState.error.toString().contains('host lookup') 
-                    ? 'Unable to load chats. Please check your internet connection and try again.' 
+                chatState.error.toString().contains('host lookup')
+                    ? 'Unable to load chats. Please check your internet connection and try again.'
                     : chatState.error.toString(),
                 style: TextStyle(
                   fontSize: 15,
@@ -334,7 +421,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               icon: const Icon(Icons.refresh),
               label: const Text('Retry'),
               style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 32, vertical: 12),
               ),
             ),
           ],
@@ -393,15 +481,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       onTap: () async {
         // Mark as read immediately for smooth UX
         if (chat.unreadCount > 0) {
-          ref.read(optimizedChatProvider.notifier).markAsRead(chat.id, chat.type);
+          ref
+              .read(optimizedChatProvider.notifier)
+              .markAsRead(chat.id, chat.type, chat.attendanceGroup);
         }
         debugPrint("Groupchat.attendanceGroup ${chat.toString()}");
         debugPrint("Groupchat.attendanceGroup ${chat.attendanceGroup}");
 
         if (chat.type == 'group') {
-          await context.push('/chat/${chat.id}?attendance_group=${chat.attendanceGroup}&type=group&name=${Uri.encodeComponent(chat.name)}');
+          await context.push(
+              '/chat/${chat.id}?attendance_group=${chat.attendanceGroup}&type=group&name=${Uri.encodeComponent(chat.name)}');
         } else {
-          await context.push('/chat/${chat.id}?attendance_group=${chat.attendanceGroup}&type=user&name=${Uri.encodeComponent(chat.name)}');
+          await context.push(
+              '/chat/${chat.id}?attendance_group=${chat.attendanceGroup}&type=user&name=${Uri.encodeComponent(chat.name)}');
         }
         // Refresh chat list when returning from chat screen
         ref.read(optimizedChatProvider.notifier).refresh();
@@ -440,7 +532,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             child: Text(
               chat.name,
               style: TextStyle(
-                fontWeight: chat.unreadCount > 0 ? FontWeight.bold : FontWeight.normal,
+                fontWeight:
+                    chat.unreadCount > 0 ? FontWeight.bold : FontWeight.normal,
               ),
               overflow: TextOverflow.ellipsis,
             ),
@@ -450,8 +543,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               _formatTime(chat.lastMessageTime),
               style: TextStyle(
                 fontSize: 12,
-                color: chat.unreadCount > 0 ? Theme.of(context).primaryColor : Colors.grey[600],
-                fontWeight: chat.unreadCount > 0 ? FontWeight.bold : FontWeight.normal,
+                color: chat.unreadCount > 0
+                    ? Theme.of(context).primaryColor
+                    : Colors.grey[600],
+                fontWeight:
+                    chat.unreadCount > 0 ? FontWeight.bold : FontWeight.normal,
               ),
             ),
         ],
@@ -463,8 +559,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               chat.lastMessage ?? 'Tap to start chatting',
               style: TextStyle(
                 color: chat.unreadCount > 0 ? Colors.black87 : Colors.grey[600],
-                fontWeight: chat.unreadCount > 0 ? FontWeight.w500 : FontWeight.normal,
-                fontStyle: chat.lastMessage == null ? FontStyle.italic : FontStyle.normal,
+                fontWeight:
+                    chat.unreadCount > 0 ? FontWeight.w500 : FontWeight.normal,
+                fontStyle: chat.lastMessage == null
+                    ? FontStyle.italic
+                    : FontStyle.normal,
               ),
               overflow: TextOverflow.ellipsis,
             ),
@@ -515,10 +614,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: Icon(chat.isPinned ? Icons.push_pin_outlined : Icons.push_pin),
+              leading: Icon(
+                  chat.isPinned ? Icons.push_pin_outlined : Icons.push_pin),
               title: Text(chat.isPinned ? 'Unpin Chat' : 'Pin Chat'),
               onTap: () {
-                ref.read(optimizedChatProvider.notifier).togglePin(chat.id, chat.type, !chat.isPinned);
+                ref
+                    .read(optimizedChatProvider.notifier)
+                    .togglePin(chat.id, chat.type, !chat.isPinned);
                 Navigator.pop(context);
               },
             ),
@@ -527,7 +629,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 leading: const Icon(Icons.done_all),
                 title: const Text('Mark as Read'),
                 onTap: () {
-                  ref.read(optimizedChatProvider.notifier).markAsRead(chat.id, chat.type);
+                  ref
+                      .read(optimizedChatProvider.notifier)
+                      .markAsRead(chat.id, chat.type, chat.attendanceGroup);
                   Navigator.pop(context);
                 },
               ),

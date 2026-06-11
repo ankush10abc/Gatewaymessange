@@ -51,7 +51,10 @@ class ChatListSyncService {
       try {
         final chatId = apiChat['id'].toString();
         final chatType = apiChat['type'] ?? 'user';
-        final key = '${chatType}_$chatId';
+        final attendance_group = apiChat['attendance_group'] ?? false;
+
+        // final key = '${chatType}_$chatId';
+        final key = attendance_group ==false ? '${chatType}_$chatId' : '${chatType}_$chatId$attendance_group' ;
 
         // Download and cache profile image
         String? localImagePath;
@@ -116,6 +119,7 @@ class ChatListSyncService {
     required String chatId,
     required String chatType,
     required String lastMessage,
+    required bool attendanceGroup,
     required DateTime lastMessageTime,
     String? senderId,
     String? senderName,
@@ -123,7 +127,7 @@ class ChatListSyncService {
   }) async {
     if (!_isInitialized || _currentUserId == null) return;
 
-    final key = '${chatType}_$chatId';
+    final key = attendanceGroup ==false ? '${chatType}_$chatId' : '${chatType}_$chatId$attendanceGroup' ;
     debugPrint('📬 Updating chat $key with new message');
 
     try {
@@ -144,6 +148,7 @@ class ChatListSyncService {
         chatId: chatId,
         chatType: chatType,
         lastMessage: lastMessage,
+        attendanceGroup: attendanceGroup,
         lastMessageTime: lastMessageTime,
         incrementUnread: incrementUnread,
       );
@@ -181,13 +186,14 @@ class ChatListSyncService {
       final chatData = Map<String, dynamic>.from(data);
       final chatId = chatData['id']?.toString();
       final chatType = chatData['type']?.toString();
+      final attendanceGroup = chatData['attendance_group'];
 
       if (chatId == null || chatType == null) return;
 
       debugPrint('🔥 Firebase update detected for $key');
-
+//
       // Get existing chat from Hive
-      final existingChat = _hiveDataSource.getChatById(chatId,chatType);
+      final existingChat = _hiveDataSource.getChatById(chatId,chatType,attendanceGroup);
 
       if (existingChat != null) {
         // Update existing chat
@@ -292,11 +298,11 @@ class ChatListSyncService {
   }
 
   /// Mark chat as read (updates both Firebase and Hive)
-  Future<void> markAsRead(String chatId, String chatType) async {
+  Future<void> markAsRead(String chatId, String chatType, bool attendance_group) async {
     if (!_isInitialized || _currentUserId == null) return;
 
-    final key = '${chatType}_$chatId';
-    
+    // final key = '${chatType}_$chatId';
+    final key = attendance_group ==false ? '${chatType}_$chatId' : '${chatType}_$chatId$attendance_group' ;
     try {
       // Update Firebase
       await _chatListRef.child(_currentUserId!).child(key).update({
@@ -305,7 +311,7 @@ class ChatListSyncService {
       });
 
       // Update Hive
-      await _hiveDataSource.updateUnreadCount(chatId, chatType, 0);
+      await _hiveDataSource.updateUnreadCount(chatId, chatType, 0,attendance_group ??false);
       
       debugPrint('✅ Marked $key as read');
     } catch (e) {

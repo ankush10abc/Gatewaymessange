@@ -191,6 +191,7 @@ class OptimizedChatNotifier extends StateNotifier<OptimizedChatState> {
     required String chatId,
     required String chatType,
     required String lastMessage,
+    required bool attendanceGroup,
     required DateTime lastMessageTime,
     String? senderId,
     String? senderName,
@@ -201,6 +202,7 @@ class OptimizedChatNotifier extends StateNotifier<OptimizedChatState> {
       chatId: chatId,
       chatType: chatType,
       lastMessage: lastMessage,
+      attendanceGroup: attendanceGroup,
       lastMessageTime: lastMessageTime,
       isIncoming: isIncoming,
     );
@@ -220,8 +222,9 @@ class OptimizedChatNotifier extends StateNotifier<OptimizedChatState> {
     await _repository.togglePinChat(chatId, chatType, isPinned);
   }
 
-  Future<void> markAsRead(String chatId, String chatType) async {
-    await _repository.markChatAsRead(chatId, chatType);
+  Future<void> markAsRead(String chatId, String chatType, bool attendance_group) async {
+    debugPrint("Ankush attendance_group $attendance_group");
+    await _repository.markChatAsRead(chatId, chatType, attendance_group ?? false);
   }
 
   int getTotalUnreadCount() {

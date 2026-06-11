@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+
 T safeParse<T>(
-    String key,
-    dynamic Function() parser, {
-      required String messageId,
-    }) {
+  String key,
+  dynamic Function() parser, {
+  required String messageId,
+}) {
   try {
     return parser();
   } catch (e, stack) {
@@ -47,8 +48,8 @@ class Message {
     this.msgId,
     required this.text,
     required this.type,
-     this.file_path,
-     this.reply_type,
+    this.file_path,
+    this.reply_type,
     required this.timestamp,
     required this.status,
     this.fileUrl,
@@ -73,7 +74,7 @@ class Message {
     } else if (json['status'] is Map) {
       final raw = json['status'] as Map;
       status = raw.map(
-            (key, value) => MapEntry(
+        (key, value) => MapEntry(
           key.toString(),
           value.toString(),
         ),
@@ -82,9 +83,7 @@ class Message {
       status = {};
     }
     try {
-      id = json['msgId']?.toString()
-          ?? json['id']?.toString()
-          ?? '';
+      id = json['msgId']?.toString() ?? json['id']?.toString() ?? '';
     } catch (e, stack) {
       debugPrint('Error parsing message id: $e');
       id = '';
@@ -120,76 +119,67 @@ class Message {
       //     );
       return Message(
         id: id,
-
         chatId: safeParse(
           'chatId',
-              () => json['group_id']?.toString()
-              ?? json['receiver_id']?.toString()
-              ?? json['chat_id']?.toString()
-              ?? '',
+          () =>
+              json['group_id']?.toString() ??
+              json['receiver_id']?.toString() ??
+              json['chat_id']?.toString() ??
+              '',
           messageId: id,
         ),
-
         senderId: safeParse(
           'senderId',
-              () => json['sender_id']?.toString()
-              ?? json['sender']?['id']?.toString()
-              ?? '',
+          () =>
+              json['sender_id']?.toString() ??
+              json['sender']?['id']?.toString() ??
+              '',
           messageId: id,
         ),
-
         senderName: safeParse(
           'senderName',
-              () => json['sender_name']
-              ?? json['senderName']
-              ?? json['sender']?['name']
-              ?? '',
+          () =>
+              json['sender_name'] ??
+              json['senderName'] ??
+              json['sender']?['name'] ??
+              '',
           messageId: id,
         ),
-
         msgId: safeParse(
           'msgId',
-              () => json['msgId']?.toString() ?? '',
+          () => json['msgId']?.toString() ?? '',
           messageId: id,
         ),
-
         profile_picture_url: safeParse(
           'profile_picture_url',
-              () => json['profile_picture_url']
-              ?? json['sender']?['profile_picture_url'],
+          () =>
+              json['profile_picture_url'] ??
+              json['sender']?['profile_picture_url'],
           messageId: id,
         ),
-
         text: safeParse(
           'text',
-              () => json['content']
-              ?? json['text']
-              ?? json['message']
-              ?? '',
+          () => json['content'] ?? json['text'] ?? json['message'] ?? '',
           messageId: id,
         ),
-
         type: safeParse(
           'type',
-              () => json['type'] ?? 'text',
+          () => json['type'] ?? 'text',
           messageId: id,
         ),
-
         file_path: safeParse(
           'file_path',
-              () => json['file_path'] ?? '',
+          () => json['file_path'] ?? '',
           messageId: id,
         ),
-
         reply_type: safeParse(
           'reply_type',
-              () => json['reply_type'] ?? '',
+          () => json['reply_type'] ?? '',
           messageId: id,
         ),
-
         timestamp: safeParse(
           'timestamp',
-              () {
+          () {
             if (json['created_at'] != null) {
               return DateTime.parse(json['created_at'].toString());
             } else if (json['timestamp'] != null) {
@@ -199,78 +189,78 @@ class Message {
           },
           messageId: id,
         ),
-
         status: safeParse(
           'status',
-              () => parseStatus(json['status']),
+          () => parseStatus(json['status']),
           messageId: id,
         ),
-
         fileUrl: safeParse(
           'file_url',
-              () => json['file_url'],
-          messageId: id,
-        ), firebaseId: safeParse(
-          'firebaseId',
-              () => json['firebaseId'],
+          () => json['file_url'],
           messageId: id,
         ),
-
+        firebaseId: safeParse(
+          'firebaseId',
+          () => json['firebaseId'],
+          messageId: id,
+        ),
         fileName: safeParse(
           'file_name',
-              () => json['file_name'] ?? '',
+          () => json['file_name'] ?? '',
           messageId: id,
         ),
-
         fileSize: safeParse(
           'file_size',
-              () => int.tryParse(json['file_size']?.toString() ?? '') ?? 0,
+          () => int.tryParse(json['file_size']?.toString() ?? '') ?? 0,
           messageId: id,
         ),
-
         replyToId: safeParse(
           'reply_to_message_id',
-              () => json['reply_to_message_id']?.toString() ?? '',
-          messageId: id,
-        ), readAt: safeParse(
-          'read_at',
-              () => json['read_at']?.toString() ?? '',
+          () => json['reply_to_message_id']?.toString() ?? '',
           messageId: id,
         ),
-
+        readAt: safeParse(
+          'read_at',
+          () => json['read_at']?.toString() ?? '',
+          messageId: id,
+        ),
         replyToMessage: safeParse(
           'reply_to_message',
-              () => json['reply_to_message'] is Map
+          () => json['reply_to_message'] is Map
               ? Message.fromJson(
-            Map<String, dynamic>.from(json['reply_to_message']),
-          )
+                  Map<String, dynamic>.from(json['reply_to_message']),
+                )
               : null,
           messageId: id,
         ),
-
         isForwarded: safeParse(
           'is_forwarded',
-              () => json['is_forwarded'] == true,
+          () => json['is_forwarded'] == true,
           messageId: id,
         ),
-
         metadata: safeParse(
           'metadata',
-              () => json['metadata'],
+          () => json['metadata'],
           messageId: id,
         ),
       );
-
-
-  } catch (e) {
+    } catch (e) {
       print("Error parsing message Model $e");
       return Message(
-        id:  json['msgId'] ?? json['id']?.toString() ?? '',
-        chatId: json['group_id']?.toString() ?? json['receiver_id']?.toString() ?? json['chat_id']?.toString() ?? '',
+        id: json['msgId'] ?? json['id']?.toString() ?? '',
+        chatId: json['group_id']?.toString() ??
+            json['receiver_id']?.toString() ??
+            json['chat_id']?.toString() ??
+            '',
         senderId: json['sender_id']?.toString() ?? json['sender']?['id'] ?? '',
-        senderName: json['sender_name'] ?? json['senderName'] ?? json['sender']?['name'] ?? '',
-        msgId: json['msgId'] ??  '',
-        profile_picture_url: json['profile_picture_url'] ?? json['profile_picture_url'] ?? json['sender']?['profile_picture_url'],
+        senderName: json['sender_name'] ??
+            json['senderName'] ??
+            json['sender']?['name'] ??
+            '',
+        msgId: json['msgId'] ?? '',
+        profile_picture_url: json['profile_picture_url'] ??
+            json['profile_picture_url'] ??
+            json['sender']?['profile_picture_url'],
         text: json['content'] ?? json['text'] ?? json['message'] ?? '',
         type: json['type'] ?? 'text',
         file_path: json['file_path'] ?? '',
@@ -278,19 +268,21 @@ class Message {
         timestamp: json['created_at'] != null
             ? DateTime.parse(json['created_at'])
             : (json['timestamp'] != null
-            ? DateTime.parse(json['timestamp'])
-            : DateTime.now()),
+                ? DateTime.parse(json['timestamp'])
+                : DateTime.now()),
         status: status,
         fileUrl: json['file_url'],
         fileName: json['file_name'] ?? '',
         fileSize: json['file_size'] ?? 0,
-        replyToId: json['reply_to_message_id'] != null ?  json['reply_to_message_id'].toString() : '',
-        readAt: json['read_at'] != null ?  json['read_at'].toString() : '',
+        replyToId: json['reply_to_message_id'] != null
+            ? json['reply_to_message_id'].toString()
+            : '',
+        readAt: json['read_at'] != null ? json['read_at'].toString() : '',
         // replyToMessage: json['reply_to_message'] != null
         //     ? Message.fromJson(json['reply_to_message'] ?? json['reply_to_message']['reply_to_message'])
         //     : null,
         isForwarded: json['is_forwarded'] ?? false,
-        metadata: json['metadata']?? null,
+        metadata: json['metadata'] ?? null,
       );
     }
   }
@@ -313,7 +305,8 @@ class Message {
       replyToId: data['replyToId'],
       readAt: data['read_at'],
       replyToMessage: data['replyToMessage'] != null
-          ? Message.fromFirestore(Map<String, dynamic>.from(data['replyToMessage']), '')
+          ? Message.fromFirestore(
+              Map<String, dynamic>.from(data['replyToMessage']), '')
           : null,
       isForwarded: data['isForwarded'] ?? false,
       metadata: data['metadata'],
@@ -345,10 +338,14 @@ class Message {
   Map<String, dynamic> toJson() {
     return {
       'id': id,
+      'msgId': msgId,
+      'firebaseId': firebaseId,
       'chat_id': chatId,
       'sender_id': senderId,
       'senderName': senderName,
+      'sender_name': senderName,
       'text': text,
+      'content': text,
       'type': type,
       'timestamp': timestamp.toIso8601String(),
       'status': status,
@@ -357,13 +354,13 @@ class Message {
       'file_name': fileName,
       'file_size': fileSize,
       'reply_to_id': replyToId,
+      'reply_to_message_id': replyToId,
       'read_at': readAt,
       'reply_to_message': replyToMessage?.toJson(),
       'is_forwarded': isForwarded,
       'reply_type': reply_type,
       'metadata': metadata,
       'profile_picture_url': profile_picture_url,
-
     };
   }
 
@@ -389,12 +386,13 @@ class Message {
 
   // Get display status for message (single tick, double tick, blue tick)
   String getDisplayStatus(List<String> participants) {
-    final otherParticipants = participants.where((id) => id != senderId).toList();
+    final otherParticipants =
+        participants.where((id) => id != senderId).toList();
     if (otherParticipants.isEmpty) return 'sent';
-    
+
     bool allRead = true;
     bool anyDelivered = false;
-    
+
     for (final userId in otherParticipants) {
       final userStatus = status[userId] ?? 'sent';
       if (userStatus == 'read') {
@@ -406,7 +404,7 @@ class Message {
         allRead = false;
       }
     }
-    
+
     if (allRead && otherParticipants.isNotEmpty) return 'read';
     if (anyDelivered) return 'delivered';
     return 'sent';
@@ -462,7 +460,7 @@ Map<String, String> parseStatus(dynamic value) {
     return {'default': value};
   } else if (value is Map) {
     return value.map(
-          (k, v) => MapEntry(k.toString(), v.toString()),
+      (k, v) => MapEntry(k.toString(), v.toString()),
     );
   }
   return {};

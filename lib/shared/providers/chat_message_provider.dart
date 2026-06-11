@@ -52,6 +52,7 @@ class ChatMessageState {
 class ChatMessageNotifier extends StateNotifier<ChatMessageState> {
   final String chatId;
   final String chatType;
+  final bool isAttendanceGroup;
   final String? currentUserId;
   final String? userRole;
   final ApiService apiService;
@@ -61,6 +62,7 @@ class ChatMessageNotifier extends StateNotifier<ChatMessageState> {
   ChatMessageNotifier({
     required this.chatId,
     required this.chatType,
+    required this.isAttendanceGroup,
     this.currentUserId,
     this.userRole,
     required this.apiService,
@@ -79,6 +81,7 @@ class ChatMessageNotifier extends StateNotifier<ChatMessageState> {
         chatType,
         currentUserId: currentUserId,
         userRole: userRole,
+        isAttendanceGroup :isAttendanceGroup,
       );
       if (cachedMessages.isNotEmpty) {
         state = state.copyWith(messages: cachedMessages);
@@ -259,6 +262,7 @@ class ChatMessageNotifier extends StateNotifier<ChatMessageState> {
 final chatMessageProvider = StateNotifierProvider.family<ChatMessageNotifier, ChatMessageState, Map<String, String?>>((ref, params) {
   final chatId = params['chatId']!;
   final chatType = params['chatType']!;
+  final isAttendanceGroup = bool.parse(params['attendance_group']!);
   final currentUserId = params['currentUserId'];
   final userRole = params['userRole'];
   
@@ -270,6 +274,7 @@ final chatMessageProvider = StateNotifierProvider.family<ChatMessageNotifier, Ch
   return ChatMessageNotifier(
     chatId: chatId,
     chatType: chatType,
+    isAttendanceGroup: isAttendanceGroup,
     currentUserId: currentUserId,
     userRole: userRole,
     apiService: apiService,
