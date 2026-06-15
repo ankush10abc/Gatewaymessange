@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:dio/dio.dart';
 import '../models/chat_hive_model.dart';
 import '../data/hive_chat_data_source.dart';
 import '../services/api_service_simple.dart';
@@ -82,7 +83,20 @@ class ChatRepository {
       
       return true;
     } catch (e) {
-      debugPrint('❌ Sync failed: $e');
+      debugPrint('\n========================================');
+      debugPrint('❌ CHAT SYNC FAILED');
+      debugPrint('========================================');
+      if (e is DioException) {
+        debugPrint('URL: ${e.requestOptions.uri}');
+        debugPrint('Method: ${e.requestOptions.method}');
+        debugPrint('Status Code: ${e.response?.statusCode}');
+        debugPrint('Headers: ${e.requestOptions.headers}');
+        debugPrint('Response: ${e.response?.data}');
+        debugPrint('Error Type: ${e.type}');
+      } else {
+        debugPrint('Error: $e');
+      }
+      debugPrint('========================================\n');
       _syncStatus = SyncStatus.error;
       return false;
     }
@@ -125,8 +139,18 @@ class ChatRepository {
     await _syncService.markAsRead(chatId, chatType, attendance_group ?? false);
   }
 
-  Future<void> togglePinChat(String chatId, String chatType, bool isPinned) async {
-    await _syncService.togglePin(chatId, chatType, isPinned);
+  Future<void> togglePinChat(
+    String chatId,
+    String chatType,
+    bool isPinned, {
+    bool attendanceGroup = false,
+  }) async {
+    await _syncService.togglePin(
+      chatId,
+      chatType,
+      isPinned,
+      attendanceGroup: attendanceGroup,
+    );
   }
 
   int getTotalUnreadCount() {

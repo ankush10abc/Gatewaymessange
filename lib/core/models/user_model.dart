@@ -7,6 +7,7 @@ class User {
   final String actual_role;
   final String? profilePicture;
   final bool isOnline;
+  final bool attendance_group =false;
   final bool can_send_attachments;
   final DateTime? lastSeen;
   final DateTime createdAt;
@@ -51,7 +52,7 @@ class User {
       updatedAt: json['updated_at'] != null 
           ? DateTime.parse(json['updated_at'])
           : DateTime.now(),
-      permissions: json['permissions'],
+      permissions: json['permissions'] ?? null,
     );
   }
 

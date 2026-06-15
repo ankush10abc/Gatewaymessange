@@ -43,7 +43,7 @@ class UserDetailScreen extends StatelessWidget {
         slivers: [
           // App Bar with Profile Image
           SliverAppBar(
-            expandedHeight: 300,
+            expandedHeight: 340,
             pinned: true,
             backgroundColor: const Color(0xFF1dab61),
             flexibleSpace: FlexibleSpaceBar(

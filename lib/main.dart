@@ -12,6 +12,7 @@ import 'core/services/api_service_simple.dart';
 import 'core/services/deep_link_service.dart';
 import 'core/services/hive_init_service.dart';
 import 'core/services/image_cache_service.dart';
+import 'core/services/message_database_service.dart';
 import 'core/services/notification_handler.dart';
 import 'core/services/offline_queue_service.dart';
 import 'core/services/sync_service.dart';
@@ -53,6 +54,9 @@ void main() async {
 
     // Initialize Hive for offline mode
     await HiveInitService.initialize();
+
+    // Initialize SQLite database for messages
+    await MessageDatabaseService.initialize();
 
     // Initialize image cache
     await ImageCacheService().initialize();

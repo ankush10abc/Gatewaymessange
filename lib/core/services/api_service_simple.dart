@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../models/chat_list_model.dart';
@@ -118,7 +117,9 @@ class PaginatedResponse<T> {
     debugPrint("Ankush Banawade fromJsonT $fromJsonT");
     return PaginatedResponse(
       data: (json['data'] as List).map((item) => fromJsonT(item)).toList(),
-      user: json['user'],
+      user: json['user'] is Map
+          ? Map<String, dynamic>.from(json['user'])
+          : <String, dynamic>{},
       total: json['total'] ?? 0,
       page: json['page'] ?? 1,
       limit: json['limit'] ?? 50,
@@ -175,6 +176,104 @@ class ProfilePictureResponse {
 
 //9005147759
 //MSakhtar@008#
+// Future<void> _initializeChat() async {
+//   debugPrint('📴 Offline - skipping Firebase presence update');
+//   final user = ref.read(authProvider).user;
+//   debugPrint('📴 Offline - skipping Firebase presence update$user');
+//   if (user == null) return;
+//
+//   _currentUserId = user.id;
+//   await _initializeAuth();
+//   debugPrint('AnkushuserRole three $user');
+//   try {
+//     // Check internet before Firebase operations
+//     final hasInternet = await InternetChecker.hasInternet();
+//     debugPrint('AnkushuserRole five $hasInternet');
+//     try {
+//       if (hasInternet) {
+//         await _loadInitialMessages();
+//         await FirebaseRealtimeService.setUserOnline(user.id);
+//       } else {
+//         await _loadInitialMessages();
+//         debugPrint('📴 Offline - skipping Firebase presence update');
+//       }
+//     } catch (e) {
+//       print(e);
+//     }
+//     debugPrint('AnkushuserRole four $user');
+//
+//
+//     debugPrint(
+//         "🔥 _setupRealtimeListeners check: attendance_group=$_isAttendanceGroup");
+//
+//     // Setup Firebase listeners ONLY if online and not attendance group
+//     if (hasInternet && _isAttendanceGroup != true) {
+//       debugPrint("✅ Setting up Firebase listeners for regular chat");
+//       _setupRealtimeListeners();
+//     } else if (!hasInternet) {
+//       debugPrint("📴 Offline - skipping Firebase listeners");
+//     } else {
+//       debugPrint("⏭️ Skipping Firebase listeners for attendance group");
+//     }
+//
+//     // Start background sync ONLY if online
+//     if (hasInternet) {
+//       _syncService.startBackgroundSync(
+//         chatId: widget.chatId,
+//         chatType: widget.chatType,
+//         apiService: _apiService,
+//         currentUserId: _currentUserId,
+//         userRole: _userRoleCache,
+//         isAttendanceGroup: _isAttendanceGroup,
+//         otherUserId: _firebaseOtherUserId,
+//       );
+//     } else {
+//       debugPrint('📴 Offline - skipping background sync');
+//     }
+//
+//     ref.read(chatProvider.notifier).resetUnreadCount(widget.chatId);
+//
+//     // Mark messages as read ONLY if online
+//     if (hasInternet) {
+//       Future.delayed(const Duration(milliseconds: 300), () {
+//         if (mounted) {
+//           FirebaseRealtimeService.markMessagesAsRead(
+//               widget.chatType, widget.chatId, user.id,
+//               currentUserId: _currentUserId,
+//               otherUserId: _firebaseOtherUserId,
+//               attendanceGroup: _isAttendanceGroup,
+//               groupMembers: widget.chatType == 'group' && _user != null
+//                   ? _user!['member_list']
+//                   : null);
+//
+//           // Update chat list to reset unread count
+//           ChatListUpdateService.updateOnMessageReceived(
+//             chatId: widget.chatId,
+//             chatType: widget.chatType,
+//             attendanceGroup: _isAttendanceGroup == true,
+//             lastMessage: _messages.isNotEmpty ? _messages.first.text : '',
+//             incrementUnread: false,
+//           );
+//         }
+//       });
+//     }
+//   } catch (e) {
+//     // if (mounted) {
+//     //   setState(() {
+//     //     _isLoadingOldMessages = false;
+//     //   });
+//     //   ScaffoldMessenger.of(context).showSnackBar(
+//     //     SnackBar(content: Text('Failed to initialize chat: $e')),
+//     //   );
+//     // }
+//     // debugPrint('Error in _initializeChat: $e');
+//   }
+//
+//   Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
+// }
+
+
+
 class ApiService {
   final Dio _dio;
   static const String baseUrl = 'https://gatewayreports.in';
@@ -189,8 +288,9 @@ class ApiService {
 
   ApiService(this._dio) {
     _dio.options.baseUrl = baseUrl;
-    _dio.options.connectTimeout = const Duration(seconds: 30);
-    _dio.options.receiveTimeout = const Duration(seconds: 30);
+    _dio.options.connectTimeout = const Duration(seconds: 60);
+    _dio.options.receiveTimeout = const Duration(seconds: 60);
+    _dio.options.sendTimeout = const Duration(seconds: 60);
 
     // Set default headers for all requests
     _dio.options.headers['Accept'] = 'application/json';
@@ -202,21 +302,44 @@ class ApiService {
         options.headers['Accept'] = 'application/json';
         final StorageService _storage = StorageService();
         final token = await _storage.getToken();
-        debugPrint("API Request Headers: $token");
-        if(token != null && token.isNotEmpty){
+        // debugPrint("API Request Headers: $token");
+        if (token != null && token.isNotEmpty) {
           _dio.options.headers['Authorization'] = 'Bearer $token';
         }
 
         if (options.data is! FormData) {
           options.headers['Content-Type'] = 'application/json';
         }
-        debugPrint('API Request Headers: ${options.headers}');
+        // debugPrint('API Request Headers: ${options.headers}');
         handler.next(options);
       },
       onError: (error, handler) async {
-        debugPrint("error $error");
-        debugPrint("error ${error.response}");
-        debugPrint("error $handler");
+        // Log detailed error information with URL and request details
+        debugPrint('\n========================================');
+        debugPrint('❌ API ERROR');
+        debugPrint('========================================');
+        debugPrint('URL: ${error.requestOptions.uri}');
+        debugPrint('Method: ${error.requestOptions.method}');
+        debugPrint('Status Code: ${error.response?.statusCode}');
+        debugPrint('Headers: ${error.requestOptions.headers}');
+        
+        if (error.requestOptions.data != null) {
+          if (error.requestOptions.data is FormData) {
+            debugPrint('Request Data: FormData (${(error.requestOptions.data as FormData).fields.length} fields)');
+          } else {
+            debugPrint('Request Data: ${error.requestOptions.data}');
+          }
+        }
+        
+        if (error.response?.data != null) {
+          debugPrint('Response: ${error.response?.data}');
+        }
+        
+        debugPrint('Error Type: ${error.type}');
+        debugPrint('Error Message: ${error.message}');
+        debugPrint('========================================\n');
+        
+        // Handle 401/403 errors
         if (error.response?.statusCode == 401 ||
             error.response?.statusCode == 403) {
           await _handle401Error();
@@ -224,6 +347,82 @@ class ApiService {
         handler.next(error);
       },
     ));
+  }
+
+  Map<String, dynamic> _metadataFromResponse(
+    Map<String, dynamic> data, {
+    required int id,
+    required String type,
+    required String fallbackName,
+  }) {
+    final rawMetadata = data['user'] ?? data['group'] ?? data['chat'];
+    final metadata = rawMetadata is Map
+        ? Map<String, dynamic>.from(rawMetadata)
+        : <String, dynamic>{};
+
+    metadata.putIfAbsent('id', () => id.toString());
+    metadata.putIfAbsent('type', () => type);
+    metadata.putIfAbsent('name', () => fallbackName);
+
+    if (type == 'group') {
+      metadata.putIfAbsent(
+        'attendance_group',
+        () => data['attendance_group'] ?? false,
+      );
+      metadata.putIfAbsent('member_list', () => <dynamic>[]);
+    }
+
+    return metadata;
+  }
+
+  // Helper function to log DioException with full details
+  void _logApiError(DioException e, String context) {
+    debugPrint('\n========================================');
+    debugPrint('❌ API ERROR - $context');
+    debugPrint('========================================');
+    debugPrint('URL: ${e.requestOptions.uri}');
+    debugPrint('Method: ${e.requestOptions.method}');
+    debugPrint('Status Code: ${e.response?.statusCode}');
+    debugPrint('Headers: ${e.requestOptions.headers}');
+    
+    if (e.requestOptions.data != null) {
+      if (e.requestOptions.data is FormData) {
+        debugPrint('Request Data: FormData (${(e.requestOptions.data as FormData).fields.length} fields)');
+      } else {
+        debugPrint('Request Data: ${e.requestOptions.data}');
+      }
+    }
+    
+    if (e.response?.data != null) {
+      debugPrint('Response: ${e.response?.data}');
+    }
+    
+    debugPrint('Error Type: ${e.type}');
+    debugPrint('Error Message: ${e.message}');
+    debugPrint('========================================\n');
+  }
+
+  List<Message> _messagesFromResponse(dynamic messagesPayload) {
+    final rawMessages = messagesPayload is Map
+        ? messagesPayload['data']
+        : messagesPayload is List
+            ? messagesPayload
+            : null;
+
+    if (rawMessages is! List) return <Message>[];
+
+    final messages = <Message>[];
+    for (final item in rawMessages) {
+      try {
+        if (item is Map) {
+          messages.add(Message.fromJson(Map<String, dynamic>.from(item)));
+        }
+      } catch (e) {
+        debugPrint('⚠️ Failed to parse API message: $e');
+      }
+    }
+
+    return messages;
   }
 
   Future<void> _handle401Error() async {
@@ -250,21 +449,30 @@ class ApiService {
 
   // Authentication APIs
   Future<AuthResponse> login(LoginRequest request) async {
-    debugPrint('API Call: POST $baseUrl/api/login - Request:lo ${request.toJson()}');
+    debugPrint(
+        'API Call: POST $baseUrl/api/login - Request:lo ${request.toJson()}');
     try {
       final response = await _dio.post(
         '/api/login',
         data: request.toJson(),
       );
-      debugPrint('API Response: POST $baseUrl/api/login - ${response.statusCode}');
+      debugPrint(
+          'API Response: POST $baseUrl/api/login - ${response.statusCode}');
       final authResponse = AuthResponse.fromJson(response.data);
       setAuthToken(authResponse.token);
       debugPrint("Ankush Banawade ${authResponse.user.role}");
       return authResponse;
     } on DioException catch (e) {
-      debugPrint('❌ Login Error:');
-      debugPrint('   → Status: ${e.response?.statusCode}');
-      debugPrint('   → Response: ${e.response?.data}');
+      debugPrint('\n========================================');
+      debugPrint('❌ LOGIN ERROR');
+      debugPrint('========================================');
+      debugPrint('URL: ${e.requestOptions.uri}');
+      debugPrint('Method: ${e.requestOptions.method}');
+      debugPrint('Status Code: ${e.response?.statusCode}');
+      debugPrint('Request Headers: ${e.requestOptions.headers}');
+      debugPrint('Request Data: ${e.requestOptions.data}');
+      debugPrint('Response Data: ${e.response?.data}');
+      debugPrint('========================================\n');
 
       // Extract error message from response
       String errorMessage = 'Login failed';
@@ -275,8 +483,8 @@ class ApiService {
         // Handle different response formats
         if (responseData is Map<String, dynamic>) {
           errorMessage = responseData['message'] ??
-                        responseData['error'] ??
-                        'Invalid credentials';
+              responseData['error'] ??
+              'Invalid credentials';
         } else if (responseData is String) {
           errorMessage = responseData;
         }
@@ -328,13 +536,27 @@ class ApiService {
     return response.data as List<dynamic>;
   }
 
-  Future<List<User>> searchUsers(String query) async {
-    debugPrint('API Call: GET $baseUrl/api/users/search?query=$query');
+  Future<List<User>> searchUsers(String query,{int page = 1}) async {
+    debugPrint('API Call: GET $baseUrl/api/users/search?page=$page&query=$query');
     final response =
-        await _dio.get('/api/users/search', queryParameters: {'query': query});
+        await _dio.get('/api/users/search', queryParameters: {'query': query,'page': page});
     debugPrint(
-        'API Response: GET $baseUrl/api/users/search - ${response.data}');
-    return (response.data as List).map((item) => User.fromJson(item)).toList();
+        'API Response: GET $baseUrl/api/users/search?page=$page - ${response.data}');
+    
+    // Handle response structure: {data: [...]} or [...]
+    final List<dynamic> userList;
+    if (response.data is Map && response.data['data'] != null) {
+      userList = response.data['data'] as List;
+    } else if (response.data is List) {
+      userList = response.data as List;
+    } else {
+      return [];
+    }
+    
+    return userList.map((item) {
+      debugPrint("Ankush catch ${User.fromJson(item)}");
+      return User.fromJson(item);
+    }).toList();
   }
 
   Future<List<User>> getTeachers() async {
@@ -436,19 +658,15 @@ class ApiService {
     );
     debugPrint(
         'API Response: GET $baseUrl/api/messages/conversation/$userId - ${response.data}');
-    List<Message> messages = [];
     final data = response.data as Map<String, dynamic>;
-    try {
-      messages = (data['messages']['data'] as List)
-          .map((json) => Message.fromJson(json))
-          .toList();
-    } catch (e) {
-      if (kDebugMode) {
-        print(e);
-      }
-    }
+    final messages = _messagesFromResponse(data['messages']);
     debugPrint(" API sync error: ${data['user']}");
-    final user = data['user'] ?? data['group'];
+    final user = _metadataFromResponse(
+      data,
+      id: userId,
+      type: 'user',
+      fallbackName: 'Chat',
+    );
 
     return PaginatedResponse(
       data: messages,
@@ -471,11 +689,13 @@ class ApiService {
         'API Response: GET $baseUrl/api/messages/group/$groupId - ${response.data}');
 
     final data = response.data as Map<String, dynamic>;
-    final messages = (data['messages']['data'] as List).map((json) {
-      debugPrint("Ankush Banawade Messahes data ${json.toString()}");
-      return Message.fromJson(json);
-    }).toList();
-    final user = data['user'] ?? data['group'];
+    final messages = _messagesFromResponse(data['messages']);
+    final user = _metadataFromResponse(
+      data,
+      id: groupId,
+      type: 'group',
+      fallbackName: 'Group',
+    );
 
     debugPrint("Ankush Banawade Messahes $user");
     return PaginatedResponse(
@@ -609,6 +829,7 @@ class ApiService {
       debugPrint(
           'API Response: POST $baseUrl/api/attendance/mark - $response Success');
     } on DioException catch (e) {
+      _logApiError(e, 'Mark Attendance');
       final message =
           e.response?.data['message'] ?? 'Failed to mark attendance';
       throw Exception('$message');
@@ -813,8 +1034,10 @@ class ApiService {
         '/api/messages/sync',
         queryParameters: params,
         options: Options(
-          headers: {'Accept': 'application/json',
-            'Content-Type': 'application/json',},
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+          },
         ),
       );
 
@@ -1040,8 +1263,10 @@ class ApiService {
       final response = await _dio.get(
         '/api/sync/queue-status',
         options: Options(
-          headers: {'Accept': 'application/json',
-            'Content-Type': 'application/json',},
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+          },
         ),
       );
 
@@ -1137,19 +1362,21 @@ class ApiService {
     final params = {
       'current_version': currentVersion,
     };
-    debugPrint('🔍 API Call: GET $baseUrl/api/app/version-check');
+    debugPrint('🔍 API Call: GET $baseUrl/api/app/version-check?current_version=$currentVersion');
     debugPrint('   Current version: v$currentVersion');
 
     try {
       final response = await _dio.get(
-        '/api/app/version-check$currentVersion',
+        '/api/app/version-check?current_version=$currentVersion',
         queryParameters: params,
         options: Options(
-          headers: {'Accept': 'application/json',
-            'Content-Type': 'application/json',},
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+          },
         ),
       );
-
+      debugPrint('✅ Version Check: Up to date${response.data}');
       final data = response.data;
       if (data['success'] == true) {
         final updateAvailable = data['data']['update_available'] ?? false;

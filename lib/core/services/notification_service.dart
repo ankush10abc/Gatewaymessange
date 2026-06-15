@@ -102,14 +102,15 @@ class NotificationService {
     final chatId = data['chat_id'] ?? data['chatId'];
     final chatType = data['chat_type'] ?? data['chatType'] ?? 'user';
     final chatName = data['chat_name'] ?? data['chatName'] ?? 'Chat';
-    
+    final attendance_group = data['attendance_group'] ?? data['attendance_group'] ?? 'false';
+
     if (chatId != null) {
-      _context!.push('/chat/$chatId?type=$chatType&name=${Uri.encodeComponent(chatName)}');
+      _context!.push('/chat/$chatId?type=$chatType&attendance_group=$attendance_group&name=${Uri.encodeComponent(chatName)}');
     }
   }
 
   static String _createPayload(Map<String, dynamic> data) {
-    return '${data['chat_id'] ?? ''}|${data['chat_type'] ?? 'user'}|${data['chat_name'] ?? 'Chat'}';
+    return '${data['chat_id'] ?? ''}|${data['chat_type'] ?? 'user'}|${data['chat_name'] ?? 'Chat'}|${data['attendance_group'] ?? 'false'}';
   }
 
   static Map<String, dynamic> _parsePayload(String payload) {
@@ -118,6 +119,7 @@ class NotificationService {
       'chat_id': parts.isNotEmpty ? parts[0] : null,
       'chat_type': parts.length > 1 ? parts[1] : 'user',
       'chat_name': parts.length > 2 ? parts[2] : 'Chat',
+      'attendance_group': parts.length > 3 ? parts[3] : 'false',
     };
   }
 }

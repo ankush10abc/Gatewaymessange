@@ -12,17 +12,25 @@ import 'chat_list_update_service.dart';
 class FirebaseRealtimeService {
   static FirebaseFirestore get firestore => FirebaseFirestore.instance;
   static FirebaseDatabase get database => FirebaseDatabase.instance;
+  static String TAG = "FirebaseRealtimeService";
+  static Map<String, dynamic>? _snapshotMap(dynamic value) {
+    if (value is! Map) return null;
+    return Map<String, dynamic>.from(value);
+  }
 
   // Send message to Firebase Realtime Database
   static Future<String> getKey(Message message,
-      {String? currentUserId, String? otherUserId, String? chatType, bool? attendanceGroup}) async {
+      {String? currentUserId,
+      String? otherUserId,
+      String? chatType,
+      bool? attendanceGroup}) async {
     final chatId = ChatUtils.generateChatId(message.chatId,
         currentUserId: currentUserId,
         otherUserId: otherUserId,
         chatType: chatType,
         attendanceGroup: attendanceGroup);
-    debugPrint(
-        'Sending message to Firebase chat ID: ${message.chatId} currentUserId $currentUserId (original: $otherUserId)');
+    // debugPrint(
+    //     '$TAG Sending message to Firebase chat ID: ${message.chatId} currentUserId $currentUserId (original: $otherUserId)');
 
     final messageRef = database.ref('chats/$chatId/messages').push();
 
@@ -43,7 +51,7 @@ class FirebaseRealtimeService {
         chatType: chatType,
         attendanceGroup: attendanceGroup);
 
-    debugPrint("Ankush api/message/save - check key $key");
+    // debugPrint("$TAG Ankush api/message/save - check key $key");
     // Only update if key exists to prevent duplicate updates
     if (key == null || key.isEmpty) return;
 
@@ -53,7 +61,7 @@ class FirebaseRealtimeService {
         'updatedAt': ServerValue.timestamp,
       });
     } catch (e) {
-      debugPrint('Error updating message: $e');
+      debugPrint('$TAG Error updating message: $e');
     }
   }
 
@@ -70,8 +78,8 @@ class FirebaseRealtimeService {
         otherUserId: otherUserId,
         chatType: chatType,
         attendanceGroup: attendanceGroup);
-    debugPrint(
-        'Sending message to Firebase chat ID: ${message.chatId} currentUserId $currentUserId (original: $otherUserId)');
+    // debugPrint(
+    //     '$TAG Sending message to Firebase chat ID: ${message.chatId} currentUserId $currentUserId (original: $otherUserId)');
 
     final messageData = message.toJson();
     messageData['timestamp'] =
@@ -137,7 +145,7 @@ class FirebaseRealtimeService {
         'lastMessage': messageData,
         'updatedAt': ServerValue.timestamp,
       });
-      
+
       // Trigger chat list update for sender
       ChatListUpdateService.updateOnMessageSent(
         chatId: message.chatId,
@@ -146,7 +154,7 @@ class FirebaseRealtimeService {
         lastMessage: message.text,
       );
     } catch (e) {
-      debugPrint("Error sending message: $e");
+      debugPrint("$TAG Error sending message: $e");
     }
 
     return messageRef.key!;
@@ -154,14 +162,17 @@ class FirebaseRealtimeService {
 
   // Send message to Firebase Realtime Database
   static Future<void> sendMessageSingle(Message message,
-      {String? currentUserId, String? otherUserId, String? chatType, bool? attendanceGroup}) async {
+      {String? currentUserId,
+      String? otherUserId,
+      String? chatType,
+      bool? attendanceGroup}) async {
     final chatId = ChatUtils.generateChatId(message.chatId,
         currentUserId: currentUserId,
         otherUserId: otherUserId,
         chatType: chatType,
         attendanceGroup: attendanceGroup);
-    debugPrint(
-        'Sending message to Firebase chat ID: ${message.chatId} currentUserId $currentUserId (original: $otherUserId)');
+    // debugPrint(
+    //     '$TAG Sending message to Firebase chat ID: ${message.chatId} currentUserId $currentUserId (original: $otherUserId)');
 
     final messageRef = database.ref('chats/$chatId/messages').push();
     final messageData = message.toJson();
@@ -189,7 +200,7 @@ class FirebaseRealtimeService {
         chatType: chatType,
         attendanceGroup: attendanceGroup);
 
-    debugPrint("✅ Loaded 6 cached messages for $firebaseChatId");
+    // debugPrint("$TAG  ✅ Loaded 6 cached messages for $firebaseChatId");
     return database
         .ref('chats/$firebaseChatId/messages')
         .orderByChild('timestamp')
@@ -200,14 +211,18 @@ class FirebaseRealtimeService {
       if (data == null) return <Message>[];
 
       try {
-        final Map<String, dynamic> messagesMap =
-            Map<String, dynamic>.from(data as Map);
+        final messagesMap = _snapshotMap(data);
+        if (messagesMap == null || messagesMap.isEmpty) {
+          return <Message>[];
+        }
+
         final messages = <Message>[];
         final seenIds = <String>{};
 
         messagesMap.forEach((key, value) {
           try {
-            final messageData = Map<String, dynamic>.from(value);
+            final messageData = _snapshotMap(value);
+            if (messageData == null) return;
             final firebaseId = messageData['firebaseId'] ?? key;
 
             if (!seenIds.contains(firebaseId)) {
@@ -219,22 +234,23 @@ class FirebaseRealtimeService {
                         messageData['timestamp'])
                     .toIso8601String();
               }
-              debugPrint("✅ Loaded 6 cached messages for messageData $messageData");
+              // debugPrint(
+              //     "$TAG ✅ Loaded 6 cached messages for messageData $messageData");
               messages.add(Message.fromJson(messageData));
             }
           } catch (e) {
-            debugPrint('Error parsing message $key: $e');
+            debugPrint('$TAG Error parsing message $key: $e');
           }
         });
 
         messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
         return messages;
       } catch (e) {
-        debugPrint('Error processing messages: $e');
+        debugPrint('$TAG Error processing messages: $e');
         return <Message>[];
       }
     }).handleError((error) {
-      debugPrint('Firebase stream error: $error');
+      debugPrint('$TAG Firebase stream error: $error');
       return <Message>[];
     });
   }
@@ -261,15 +277,17 @@ class FirebaseRealtimeService {
 
       if (!snapshot.exists) return <Message>[];
 
-      final Map<String, dynamic> messagesMap =
-          Map<String, dynamic>.from(snapshot.value as Map);
+      final messagesMap = _snapshotMap(snapshot.value);
+      if (messagesMap == null || messagesMap.isEmpty) return <Message>[];
+
       final messages = <Message>[];
       final seenIds = <String>{};
       final beforeMillis = beforeTimestamp.millisecondsSinceEpoch;
 
       messagesMap.forEach((key, value) {
         try {
-          final messageData = Map<String, dynamic>.from(value);
+          final messageData = _snapshotMap(value);
+          if (messageData == null) return;
           final firebaseId = messageData['firebaseId'] ?? key;
           final timestamp = messageData['timestamp'] as int?;
 
@@ -284,15 +302,14 @@ class FirebaseRealtimeService {
             messages.add(Message.fromJson(messageData));
           }
         } catch (e) {
-          debugPrint('Error parsing message $key: $e');
+          debugPrint('$TAG Error parsing message $key: $e');
         }
       });
 
       messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
       return messages.take(limit).toList();
     } catch (e) {
-
-      debugPrint('Error loading older messages: $e');
+      debugPrint('$TAG Error loading older messages: $e');
       return <Message>[];
     }
   }
@@ -311,14 +328,18 @@ class FirebaseRealtimeService {
       if (data == null) return <Message>[];
 
       try {
-        final Map<String, dynamic> messagesMap =
-            Map<String, dynamic>.from(data as Map);
+        final messagesMap = _snapshotMap(data);
+        if (messagesMap == null || messagesMap.isEmpty) {
+          return <Message>[];
+        }
+
         final messages = <Message>[];
         final seenIds = <String>{};
 
         messagesMap.forEach((key, value) {
           try {
-            final messageData = Map<String, dynamic>.from(value);
+            final messageData = _snapshotMap(value);
+            if (messageData == null) return;
             final firebaseId = messageData['firebaseId'] ?? key;
 
             if (!seenIds.contains(firebaseId)) {
@@ -334,18 +355,18 @@ class FirebaseRealtimeService {
               messages.add(Message.fromJson(messageData));
             }
           } catch (e) {
-            debugPrint('Error parsing message $key: $e');
+            debugPrint('$TAG Error parsing message $key: $e');
           }
         });
 
         messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
         return messages;
       } catch (e) {
-        debugPrint('Error processing messages: $e');
+        debugPrint('$TAG Error processing messages: $e');
         return <Message>[];
       }
     }).handleError((error) {
-      debugPrint('Firebase stream error: $error');
+      debugPrint('$TAG Firebase stream error: $error');
       return <Message>[];
     });
   }
@@ -364,27 +385,36 @@ class FirebaseRealtimeService {
       final data = event.snapshot.value;
       if (data == null) return <Message>[];
 
-      final Map<String, dynamic> messagesMap =
-          Map<String, dynamic>.from(data as Map);
+      final messagesMap = _snapshotMap(data);
+      if (messagesMap == null || messagesMap.isEmpty) return <Message>[];
+
       final messages = <Message>[];
 
       messagesMap.forEach((key, value) {
-        final messageData = Map<String, dynamic>.from(value);
-        messageData['id'] = key;
+        try {
+          final messageData = _snapshotMap(value);
+          if (messageData == null) return;
+          messageData['id'] = key;
 
-        // Handle timestamp conversion
-        if (messageData['timestamp'] is int) {
-          messageData['timestamp'] =
-              DateTime.fromMillisecondsSinceEpoch(messageData['timestamp'])
-                  .toIso8601String();
+          // Handle timestamp conversion
+          if (messageData['timestamp'] is int) {
+            messageData['timestamp'] =
+                DateTime.fromMillisecondsSinceEpoch(messageData['timestamp'])
+                    .toIso8601String();
+          }
+
+          messages.add(Message.fromJson(messageData));
+        } catch (e) {
+          debugPrint('$TAG Error parsing message $key: $e');
         }
-
-        messages.add(Message.fromJson(messageData));
       });
 
       messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-      debugPrint("Ankush Banawade Messahes debugError Eleven $messages");
+      debugPrint("$TAG Ankush Banawade Messahes debugError Eleven $messages");
       return messages;
+    }).handleError((error) {
+      debugPrint('$TAG Firebase stream error: $error');
+      return <Message>[];
     });
   }
 
@@ -444,7 +474,7 @@ class FirebaseRealtimeService {
         }
       }
     } catch (e) {
-      debugPrint('Error updating message status: $e');
+      debugPrint('$TAG Error updating message status: $e');
     }
   }
 
@@ -456,7 +486,6 @@ class FirebaseRealtimeService {
       List<dynamic>? groupMembers,
       bool? attendanceGroup}) async {
     try {
-
       final firebaseChatId = ChatUtils.generateChatId(chatId,
           chatType: chatType,
           currentUserId: currentUserId,
@@ -466,13 +495,17 @@ class FirebaseRealtimeService {
       final messagesSnapshot =
           await database.ref('chats/$firebaseChatId/messages').get();
 
-
       if (messagesSnapshot.exists) {
-        debugPrint("Data Error marking messages as read take ${messagesSnapshot.value}");
-        final messages = messagesSnapshot.value as Map<dynamic, dynamic>;
+        debugPrint(
+            "$TAG Data Error marking messages as read take ${messagesSnapshot.value}");
+        final messages = messagesSnapshot.value is Map
+            ? messagesSnapshot.value as Map<dynamic, dynamic>
+            : null;
+        if (messages == null || messages.isEmpty) return;
         // final messages = messagesSnapshot.value as List<dynamic>;
-      debugPrint("Data Error marking messages as read ${messages.entries}");
+        debugPrint("$TAG Data Error marking messages as read ${messages.entries}");
         for (final entry in messages.entries) {
+          if (entry.value is! Map) continue;
           final messageData = entry.value as Map<dynamic, dynamic>;
           final senderId = messageData['senderId']?.toString();
 
@@ -480,7 +513,8 @@ class FirebaseRealtimeService {
             // Get current status to avoid unnecessary updates
             final currentStatus = messageData['status']?[userId]?.toString();
             if (currentStatus != 'read') {
-              debugPrint("Data Error marking messages as read ${firebaseChatId} key ${entry.key}");
+              // debugPrint(
+              //     "$TAG Data Error marking messages as read ${firebaseChatId} key ${entry.key}");
               await database
                   .ref(
                       'chats/$firebaseChatId/messages/${entry.key}/status/$userId')
@@ -494,32 +528,32 @@ class FirebaseRealtimeService {
                   .get();
 
               if (statusSnapshot.exists) {
-                debugPrint("Data Error catch ${Map<String, dynamic>.from(statusSnapshot.value as Map)} key ");
-                final statusMap =
-                    Map<String, dynamic>.from(statusSnapshot.value as Map);
+                final statusMap = _snapshotMap(statusSnapshot.value);
+                if (statusMap == null || statusMap.isEmpty) continue;
+                debugPrint("$TAG Data Error catch $statusMap key ");
                 bool allRead = true;
 
                 try {
                   for (final member in groupMembers) {
-
-                                    final memberId =
-                                        member['id']?.toString() ?? member.toString();
-                                    if (memberId != senderId) {
-                                      final memberStatus =
-                                          statusMap[memberId]?.toString() ?? 'sent';
-                                      if (memberStatus != 'read') {
-                                        allRead = false;
-                                        break;
-                                      }
-                                    }
-                                  }
+                    final memberId =
+                        member['id']?.toString() ?? member.toString();
+                    if (memberId != senderId) {
+                      final memberStatus =
+                          statusMap[memberId]?.toString() ?? 'sent';
+                      if (memberStatus != 'read') {
+                        allRead = false;
+                        break;
+                      }
+                    }
+                  }
                 } catch (e) {
-                  debugPrint("Data Error catch ${e} key ${e.toString()}");
+                  debugPrint("$TAG Data Error catch ${e} key ${e.toString()}");
                   print(e);
                 }
 
                 if (allRead) {
-                  debugPrint("Data Error marking messages as read All  ${firebaseChatId} key ${entry.key}");
+                  // debugPrint(
+                  //     "$TAG Data Error marking messages as read All  ${firebaseChatId} key ${entry.key}");
                   await database
                       .ref(
                           'chats/$firebaseChatId/messages/${entry.key}/allRead')
@@ -531,7 +565,7 @@ class FirebaseRealtimeService {
         }
       }
     } catch (e) {
-      debugPrint('Error marking messages as read: $e');
+      debugPrint('$TAG Error marking messages as read: $e');
     }
   }
 
@@ -566,14 +600,16 @@ class FirebaseRealtimeService {
   // Typing indicator
   static Future<void> setTyping(
       String chatType, String chatId, String userId, bool isTyping,
-      {String? currentUserId, String? otherUserId, bool? attendanceGroup}) async {
-    debugPrint("setTyping $chatId $userId $isTyping");
+      {String? currentUserId,
+      String? otherUserId,
+      bool? attendanceGroup}) async {
+    // debugPrint("$TAG setTyping $chatId $userId $isTyping");
     final firebaseChatId = ChatUtils.generateChatId(chatId,
         chatType: chatType,
         currentUserId: currentUserId,
         otherUserId: otherUserId,
         attendanceGroup: attendanceGroup);
-    debugPrint("setTyping $firebaseChatId $userId $isTyping");
+    // debugPrint("$TAG setTyping $firebaseChatId $userId $isTyping");
     if (isTyping) {
       await database.ref('typing/$firebaseChatId/$userId').set({
         'isTyping': true,
@@ -592,15 +628,15 @@ class FirebaseRealtimeService {
   static Stream<Map<String, dynamic>> getTypingUsers(
       String chatId, String chatType,
       {String? currentUserId, String? otherUserId, bool? attendanceGroup}) {
-    debugPrint(' getTypingUsers Listening to Firebase chat ID: $otherUserId');
+    // debugPrint('$TAG getTypingUsers Listening to Firebase chat ID: $otherUserId');
     var firebaseChatId = ChatUtils.generateChatId(
         chatType != 'group' ? otherUserId! : chatId,
         chatType: chatType,
         currentUserId: currentUserId,
         otherUserId: otherUserId,
         attendanceGroup: attendanceGroup);
-    debugPrint(
-        ' getTypingUsers Listening to Firebase chat ID: $firebaseChatId');
+    // debugPrint(
+    //     '$TAG getTypingUsers Listening to Firebase chat ID: $firebaseChatId');
     // firebaseChatId = 'private_4';
     return database.ref('typing/$firebaseChatId').onValue.map((event) {
       final value = event.snapshot.value;
@@ -617,7 +653,7 @@ class FirebaseRealtimeService {
 
         return result;
       } catch (e) {
-        debugPrint('Error converting typing data: $e');
+        debugPrint('$TAG Error converting typing data: $e');
         return <String, dynamic>{};
       }
     });
@@ -642,17 +678,17 @@ class FirebaseRealtimeService {
   }
 
   // Get chat stream
-  static Stream<Chat?> getChatStream(String chatId) {
-    return firestore
-        .collection('chats')
-        .doc(chatId)
-        .snapshots(includeMetadataChanges: false)
-        .handleError((error) {
-      debugPrint('Chat stream error: $error');
-      return <DocumentSnapshot>[];
-    }).map((doc) =>
-            doc.exists ? Chat.fromFirestore(doc.data()!, doc.id) : null);
-  }
+  // static Stream<Chat?> getChatStream(String chatId) {
+  //   return firestore
+  //       .collection('chats')
+  //       .doc(chatId)
+  //       .snapshots(includeMetadataChanges: false)
+  //       .handleError((error) {
+  //     debugPrint('Chat stream error: $error');
+  //     return <DocumentSnapshot>[];
+  //   }).map((doc) =>
+  //           doc.exists ? Chat.fromFirestore(doc.data()!, doc.id) : null);
+  // }
 
   // Forward message
   static Future<void> forwardMessage(

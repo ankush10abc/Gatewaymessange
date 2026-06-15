@@ -9,6 +9,7 @@ T safeParse<T>(
   try {
     return parser();
   } catch (e, stack) {
+
     debugPrint('❌ Error parsing key: "$key"');
     debugPrint('Message ID: $messageId');
     debugPrint('Exception: $e');
@@ -64,6 +65,38 @@ class Message {
     this.profile_picture_url,
   });
 
+  static String resolveMessageId(Map<String, dynamic> json) {
+    final msgIdValue = json['msgId']?.toString().trim();
+    final idValue = json['id']?.toString().trim();
+
+    if (msgIdValue != null && msgIdValue.isNotEmpty && msgIdValue != '0') {
+      return msgIdValue;
+    }
+
+    if (idValue != null && idValue.isNotEmpty && idValue != '0') {
+      return idValue;
+    }
+
+    return '';
+  }
+
+  static String resolveStorageKey(Message message) {
+    final candidates = [
+      message.firebaseId,
+      message.msgId,
+      message.id,
+    ];
+
+    for (final candidate in candidates) {
+      final key = candidate?.trim();
+      if (key != null && key.isNotEmpty && key != '0') {
+        return key;
+      }
+    }
+
+    return 'msg_${message.timestamp.millisecondsSinceEpoch}';
+  }
+
   factory Message.fromJson(Map<String, dynamic> json) {
     // debugPrint("Ankush Message json Model inside ${json}");
     String id = '';
@@ -83,8 +116,9 @@ class Message {
       status = {};
     }
     try {
-      id = json['msgId']?.toString() ?? json['id']?.toString() ?? '';
-    } catch (e, stack) {
+      // Priority: msgId -> id, but skip empty/zero values.
+      id = resolveMessageId(json);
+    } catch (e) {
       debugPrint('Error parsing message id: $e');
       id = '';
     }
@@ -240,14 +274,21 @@ class Message {
         ),
         metadata: safeParse(
           'metadata',
-          () => json['metadata'],
+          () {
+            final meta = json['metadata'];
+            if (meta == null) return null;
+            if (meta is Map<String, dynamic>) return meta;
+            if (meta is Map) return Map<String, dynamic>.from(meta);
+            return null;
+          },
           messageId: id,
         ),
       );
     } catch (e) {
       print("Error parsing message Model $e");
+      final fallbackId = resolveMessageId(json);
       return Message(
-        id: json['msgId'] ?? json['id']?.toString() ?? '',
+        id: fallbackId,
         chatId: json['group_id']?.toString() ??
             json['receiver_id']?.toString() ??
             json['chat_id']?.toString() ??
@@ -257,7 +298,7 @@ class Message {
             json['senderName'] ??
             json['sender']?['name'] ??
             '',
-        msgId: json['msgId'] ?? '',
+        msgId: json['msgId']?.toString() ?? '',
         profile_picture_url: json['profile_picture_url'] ??
             json['profile_picture_url'] ??
             json['sender']?['profile_picture_url'],

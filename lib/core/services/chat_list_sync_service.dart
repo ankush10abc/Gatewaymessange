@@ -20,6 +20,44 @@ class ChatListSyncService {
   bool _isInitialized = false;
   String? _currentUserId;
 
+  bool _asBool(dynamic value) => ChatHiveModel.parseAttendanceGroup(value);
+
+  int _asInt(dynamic value, {int fallback = 0}) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return int.tryParse(value?.toString() ?? '') ?? fallback;
+  }
+
+  DateTime? _asDateTime(dynamic value) {
+    if (value == null) return null;
+    if (value is DateTime) return value;
+    if (value is int) return DateTime.fromMillisecondsSinceEpoch(value);
+    if (value is num) return DateTime.fromMillisecondsSinceEpoch(value.toInt());
+    return DateTime.tryParse(value.toString());
+  }
+
+  Map<String, dynamic> _parseChatKey(String key) {
+    final isAttendanceGroup = key.endsWith('true');
+    final normalizedKey = isAttendanceGroup
+        ? key.substring(0, key.length - 'true'.length)
+        : key;
+    final separatorIndex = normalizedKey.indexOf('_');
+
+    if (separatorIndex == -1) {
+      return {
+        'type': 'user',
+        'id': normalizedKey,
+        'attendance_group': isAttendanceGroup,
+      };
+    }
+
+    return {
+      'type': normalizedKey.substring(0, separatorIndex),
+      'id': normalizedKey.substring(separatorIndex + 1),
+      'attendance_group': isAttendanceGroup,
+    };
+  }
+
   /// Initialize service with user ID
   Future<void> initialize(String userId) async {
     if (_isInitialized && _currentUserId == userId) return;
@@ -50,11 +88,13 @@ class ChatListSyncService {
     for (final apiChat in apiChats) {
       try {
         final chatId = apiChat['id'].toString();
-        final chatType = apiChat['type'] ?? 'user';
-        final attendance_group = apiChat['attendance_group'] ?? false;
-
-        // final key = '${chatType}_$chatId';
-        final key = attendance_group ==false ? '${chatType}_$chatId' : '${chatType}_$chatId$attendance_group' ;
+        final chatType = apiChat['type']?.toString() ?? 'user';
+        final attendanceGroup = _asBool(apiChat['attendance_group']);
+        final key = ChatHiveModel.buildKey(
+          id: chatId,
+          type: chatType,
+          attendanceGroup: attendanceGroup,
+        );
 
         // Download and cache profile image
         String? localImagePath;
@@ -81,6 +121,7 @@ class ChatListSyncService {
           'is_pinned': hiveChat.isPinned,
           'attendance_group': hiveChat.attendanceGroup,
           'actual_role': hiveChat.actualRole,
+          'member_count': hiveChat.memberCount,
           'group_type': hiveChat.groupType,
           'role': hiveChat.role,
           'mobile': hiveChat.mobile,
@@ -127,7 +168,11 @@ class ChatListSyncService {
   }) async {
     if (!_isInitialized || _currentUserId == null) return;
 
-    final key = attendanceGroup ==false ? '${chatType}_$chatId' : '${chatType}_$chatId$attendanceGroup' ;
+    final key = ChatHiveModel.buildKey(
+      id: chatId,
+      type: chatType,
+      attendanceGroup: attendanceGroup,
+    );
     debugPrint('📬 Updating chat $key with new message');
 
     try {
@@ -184,48 +229,68 @@ class ChatListSyncService {
       if (data == null) return;
 
       final chatData = Map<String, dynamic>.from(data);
-      final chatId = chatData['id']?.toString();
-      final chatType = chatData['type']?.toString();
-      final attendanceGroup = chatData['attendance_group'];
+      final parsedKey = _parseChatKey(key);
+      final chatId = chatData['id']?.toString() ?? parsedKey['id']?.toString();
+      final chatType =
+          chatData['type']?.toString() ?? parsedKey['type']?.toString();
+      final attendanceGroup = _asBool(
+        chatData['attendance_group'] ?? parsedKey['attendance_group'],
+      );
 
       if (chatId == null || chatType == null) return;
 
       debugPrint('🔥 Firebase update detected for $key');
 //
       // Get existing chat from Hive
-      final existingChat = _hiveDataSource.getChatById(chatId,chatType,attendanceGroup);
+      final existingChat = _hiveDataSource.getChatById(
+        chatId,
+        chatType,
+        attendanceGroup,
+      );
 
       if (existingChat != null) {
         // Update existing chat
-        final lastMsgTime = chatData['last_message_time'] != null
-            ? DateTime.fromMillisecondsSinceEpoch(chatData['last_message_time'])
-            : existingChat.lastMessageTime;
+        final lastMsgTime =
+            _asDateTime(chatData['last_message_time']) ??
+                _asDateTime(chatData['last_message_time_iso']) ??
+                existingChat.lastMessageTime;
 
-        final sortTime = chatData['sort_time'] != null
-            ? DateTime.fromMillisecondsSinceEpoch(chatData['sort_time'])
-            : lastMsgTime;
+        final sortTime = _asDateTime(chatData['sort_time']) ?? lastMsgTime;
 
         final updated = ChatHiveModel(
           id: chatId,
           type: chatType,
-          name: chatData['name'] ?? existingChat.name,
-          profilePicture: chatData['profile_picture'] ?? existingChat.profilePicture,
+          name: chatData['name']?.toString() ?? existingChat.name,
+          profilePicture:
+              chatData['profile_picture']?.toString() ?? existingChat.profilePicture,
           localImagePath: existingChat.localImagePath,
-          lastMessage: chatData['last_message'] ?? existingChat.lastMessage,
+          lastMessage:
+              chatData['last_message']?.toString() ?? existingChat.lastMessage,
           lastMessageTime: lastMsgTime,
-          unreadCount: chatData['unread_count'] ?? existingChat.unreadCount,
-          isPinned: chatData['is_pinned'] ?? existingChat.isPinned,
-          attendanceGroup: chatData['attendance_group'] ?? existingChat.attendanceGroup,
-          actualRole: chatData['actual_role'] ?? existingChat.actualRole,
+          unreadCount: _asInt(
+            chatData['unread_count'],
+            fallback: existingChat.unreadCount,
+          ),
+          isPinned: chatData.containsKey('is_pinned')
+              ? _asBool(chatData['is_pinned'])
+              : existingChat.isPinned,
+          attendanceGroup: attendanceGroup,
+          actualRole:
+              chatData['actual_role']?.toString() ?? existingChat.actualRole,
           createdAt: existingChat.createdAt,
           updatedAt: DateTime.now(),
           lastReadAt: existingChat.lastReadAt,
-          memberCount: chatData['member_count'] ?? existingChat.memberCount,
-          groupType: chatData['group_type'] ?? existingChat.groupType,
-          role: chatData['role'] ?? existingChat.role,
-          mobile: chatData['mobile'] ?? existingChat.mobile,
-          className: chatData['class_name'] ?? existingChat.className,
-          sectionName: chatData['section_name'] ?? existingChat.sectionName,
+          memberCount: chatData['member_count'] != null
+              ? _asInt(chatData['member_count'])
+              : existingChat.memberCount,
+          groupType:
+              chatData['group_type']?.toString() ?? existingChat.groupType,
+          role: chatData['role']?.toString() ?? existingChat.role,
+          mobile: chatData['mobile']?.toString() ?? existingChat.mobile,
+          className:
+              chatData['class_name']?.toString() ?? existingChat.className,
+          sectionName:
+              chatData['section_name']?.toString() ?? existingChat.sectionName,
           sortTime: sortTime,
         );
 
@@ -233,13 +298,12 @@ class ChatListSyncService {
         debugPrint('⬆️ Chat $key moved to top with sortTime: $sortTime');
       } else {
         // Create new chat entry
-        final lastMsgTime = chatData['last_message_time'] != null
-            ? DateTime.fromMillisecondsSinceEpoch(chatData['last_message_time'])
-            : DateTime.now();
+        final lastMsgTime =
+            _asDateTime(chatData['last_message_time']) ??
+                _asDateTime(chatData['last_message_time_iso']) ??
+                DateTime.now();
 
-        final sortTime = chatData['sort_time'] != null
-            ? DateTime.fromMillisecondsSinceEpoch(chatData['sort_time'])
-            : lastMsgTime;
+        final sortTime = _asDateTime(chatData['sort_time']) ?? lastMsgTime;
 
         // Download profile image if available
         String? localImagePath;
@@ -251,22 +315,25 @@ class ChatListSyncService {
         final newChat = ChatHiveModel(
           id: chatId,
           type: chatType,
-          name: chatData['name'] ?? 'Unknown',
-          profilePicture: chatData['profile_picture'],
+          name: chatData['name']?.toString() ?? 'Unknown',
+          profilePicture: chatData['profile_picture']?.toString(),
           localImagePath: localImagePath,
-          lastMessage: chatData['last_message'],
+          lastMessage: chatData['last_message']?.toString(),
           lastMessageTime: lastMsgTime,
-          unreadCount: chatData['unread_count'] ?? 0,
-          isPinned: chatData['is_pinned'] ?? false,
-          attendanceGroup: chatData['attendance_group'],
-          actualRole: chatData['actual_role'],
+          unreadCount: _asInt(chatData['unread_count']),
+          isPinned: _asBool(chatData['is_pinned']),
+          attendanceGroup: attendanceGroup,
+          actualRole: chatData['actual_role']?.toString(),
           createdAt: DateTime.now(),
           updatedAt: DateTime.now(),
-          groupType: chatData['group_type'],
-          role: chatData['role'],
-          mobile: chatData['mobile'],
-          className: chatData['class_name'],
-          sectionName: chatData['section_name'],
+          memberCount: chatData['member_count'] != null
+              ? _asInt(chatData['member_count'])
+              : null,
+          groupType: chatData['group_type']?.toString(),
+          role: chatData['role']?.toString(),
+          mobile: chatData['mobile']?.toString(),
+          className: chatData['class_name']?.toString(),
+          sectionName: chatData['section_name']?.toString(),
           sortTime: sortTime,
         );
 
@@ -301,8 +368,12 @@ class ChatListSyncService {
   Future<void> markAsRead(String chatId, String chatType, bool attendance_group) async {
     if (!_isInitialized || _currentUserId == null) return;
 
-    // final key = '${chatType}_$chatId';
-    final key = attendance_group ==false ? '${chatType}_$chatId' : '${chatType}_$chatId$attendance_group' ;
+    final attendanceGroup = _asBool(attendance_group);
+    final key = ChatHiveModel.buildKey(
+      id: chatId,
+      type: chatType,
+      attendanceGroup: attendanceGroup,
+    );
     try {
       // Update Firebase
       await _chatListRef.child(_currentUserId!).child(key).update({
@@ -311,7 +382,12 @@ class ChatListSyncService {
       });
 
       // Update Hive
-      await _hiveDataSource.updateUnreadCount(chatId, chatType, 0,attendance_group ??false);
+      await _hiveDataSource.updateUnreadCount(
+        chatId,
+        chatType,
+        0,
+        attendanceGroup,
+      );
       
       debugPrint('✅ Marked $key as read');
     } catch (e) {
@@ -320,10 +396,19 @@ class ChatListSyncService {
   }
 
   /// Toggle pin status
-  Future<void> togglePin(String chatId, String chatType, bool isPinned) async {
+  Future<void> togglePin(
+    String chatId,
+    String chatType,
+    bool isPinned, {
+    bool attendanceGroup = false,
+  }) async {
     if (!_isInitialized || _currentUserId == null) return;
 
-    final key = '${chatType}_$chatId';
+    final key = ChatHiveModel.buildKey(
+      id: chatId,
+      type: chatType,
+      attendanceGroup: attendanceGroup,
+    );
     
     try {
       // Update Firebase
@@ -332,7 +417,12 @@ class ChatListSyncService {
       });
 
       // Update Hive
-      await _hiveDataSource.togglePinChat(chatId, chatType, isPinned);
+      await _hiveDataSource.togglePinChat(
+        chatId,
+        chatType,
+        isPinned,
+        attendanceGroup: attendanceGroup,
+      );
       
       debugPrint('📌 ${isPinned ? 'Pinned' : 'Unpinned'} $key');
     } catch (e) {

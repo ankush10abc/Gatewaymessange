@@ -29,7 +29,7 @@ class FirebaseMessageListener {
 
     try {
       final data = remoteMessage.data;
-      
+        debugPrint("Ankush Message $data");
       final chatId = data['chat_id']?.toString() ?? data['group_id']?.toString();
       final chatType = data['chat_type'] ?? (data['group_id'] != null ? 'group' : 'user');
       final messageText = data['message'] ?? data['body'] ?? '';

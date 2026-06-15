@@ -3,7 +3,8 @@ import '../models/message_hive_model.dart';
 import '../models/message_model.dart';
 
 class HiveMessageDataSource {
-  static final HiveMessageDataSource _instance = HiveMessageDataSource._internal();
+  static final HiveMessageDataSource _instance =
+      HiveMessageDataSource._internal();
   factory HiveMessageDataSource() => _instance;
   HiveMessageDataSource._internal();
 
@@ -20,44 +21,36 @@ class HiveMessageDataSource {
   Future<void> saveMessages(String chatId, List<Message> messages) async {
     final box = await _getBox(chatId);
     final Map<String, MessageHiveModel> messagesMap = {};
-    
+
     for (final message in messages) {
-      final key = message.firebaseId ?? message.msgId ?? message.id;
-      if (key.isNotEmpty) {
-        messagesMap[key] = MessageHiveModel.fromMessage(message);
-      }
+      final key = Message.resolveStorageKey(message);
+      messagesMap[key] = MessageHiveModel.fromMessage(message);
     }
-    
+
     await box.putAll(messagesMap);
   }
 
   Future<void> saveMessage(String chatId, Message message) async {
     final box = await _getBox(chatId);
-    final key = message.firebaseId ?? message.msgId ?? message.id;
-    if (key.isNotEmpty) {
-      await box.put(key, MessageHiveModel.fromMessage(message));
-    }
+    final key = Message.resolveStorageKey(message);
+    await box.put(key, MessageHiveModel.fromMessage(message));
   }
 
   Future<List<Message>> getMessages(String chatId, {int limit = 50}) async {
     final box = await _getBox(chatId);
-    final messages = box.values
-        .map((hiveMsg) => hiveMsg.toMessage())
-        .toList()
+    final messages = box.values.map((hiveMsg) => hiveMsg.toMessage()).toList()
       ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
-    
+
     return limit > 0 ? messages.take(limit).toList() : messages;
   }
 
   Stream<List<Message>> watchMessages(String chatId, {int limit = 50}) async* {
     final box = await _getBox(chatId);
-    
+
     yield* box.watch().map((_) {
-      final messages = box.values
-          .map((hiveMsg) => hiveMsg.toMessage())
-          .toList()
+      final messages = box.values.map((hiveMsg) => hiveMsg.toMessage()).toList()
         ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
-      
+
       return limit > 0 ? messages.take(limit).toList() : messages;
     });
   }

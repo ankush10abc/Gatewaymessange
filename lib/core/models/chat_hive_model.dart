@@ -91,6 +91,27 @@ class ChatHiveModel extends HiveObject {
     this.sortTime,
   });
 
+  static bool parseAttendanceGroup(dynamic value) {
+    if (value == null) return false;
+    if (value is bool) return value;
+    if (value is num) return value == 1;
+
+    final normalized = value.toString().trim().toLowerCase();
+    return normalized == 'true' ||
+        normalized == '1' ||
+        normalized == 'yes' ||
+        normalized == 'y';
+  }
+
+  static String buildKey({
+    required String id,
+    required String type,
+    dynamic attendanceGroup,
+  }) {
+    final isAttendanceGroup = parseAttendanceGroup(attendanceGroup);
+    return isAttendanceGroup ? '${type}_$id$isAttendanceGroup' : '${type}_$id';
+  }
+
   // Factory from API response
   factory ChatHiveModel.fromApi(Map<String, dynamic> json, {String? localImagePath}) {
     final lastMsgTime = json['last_message_time'] != null
@@ -100,30 +121,30 @@ class ChatHiveModel extends HiveObject {
     final sortTime = json['sort_time'] != null
         ? DateTime.tryParse(json['sort_time'])
         : lastMsgTime;
-    debugPrint("💬 Upserted chat:attendanceGroup ${json['attendance_group']}");
+    // debugPrint("💬 Upserted chat:attendanceGroup ${json.toString()}");
     return ChatHiveModel(
       id: json['id'].toString(),
-      type: json['type'] ?? 'user',
+      type: json['type']?.toString() ?? 'user',
       name: json['name'] ?? 'Unknown',
       profilePicture: json['profile_picture'],
       localImagePath: localImagePath,
       lastMessage: json['last_message'],
       lastMessageTime: lastMsgTime,
       unreadCount: (json['unread_count'] is int) ? json['unread_count'] : (int.tryParse(json['unread_count']?.toString() ?? '0') ?? 0),
-      isPinned: json['is_pinned'] == true || json['is_pinned'] == 1,
-      attendanceGroup: json['attendance_group'] == true || json['attendance_group'] == 1,
-      actualRole: json['actual_role'],
+      isPinned: parseAttendanceGroup(json['is_pinned']),
+      attendanceGroup: parseAttendanceGroup(json['attendance_group']),
+      actualRole: json['actual_role']?.toString(),
       createdAt: DateTime.tryParse(json['created_at'] ?? '') ?? DateTime.now(),
       updatedAt: DateTime.tryParse(json['updated_at'] ?? '') ?? DateTime.now(),
       lastReadAt: json['last_read_at'] != null
           ? DateTime.tryParse(json['last_read_at'])
           : null,
-      memberCount: json['member_count'],
-      groupType: json['group_type'],
-      role: json['role'],
-      mobile: json['mobile'],
-      className: json['class_name'],
-      sectionName: json['section_name'],
+      memberCount: int.tryParse(json['member_count']?.toString() ?? ''),
+      groupType: json['group_type']?.toString(),
+      role: json['role']?.toString(),
+      mobile: json['mobile']?.toString(),
+      className: json['class_name']?.toString(),
+      sectionName: json['section_name']?.toString(),
       sortTime: sortTime,
     );
   }
@@ -163,7 +184,10 @@ class ChatHiveModel extends HiveObject {
     return thisTime.isBefore(otherTime) ||
         unreadCount != other.unreadCount ||
         isPinned != other.isPinned ||
-        lastMessage != other.lastMessage;
+        lastMessage != other.lastMessage ||
+        name != other.name ||
+        profilePicture != other.profilePicture ||
+        attendanceGroup != other.attendanceGroup;
   }
 
   // Get image path (local first, then remote)
@@ -207,7 +231,12 @@ class ChatHiveModel extends HiveObject {
   }
 
   String getUniqueKey() {
-    debugPrint("💬 Upserted chat:attendanceGroup ${attendanceGroup == false ? '${type}_$id' :  '${type}_$id$attendanceGroup'}");
-    return attendanceGroup == false ? '${type}_$id' :  '${type}_$id$attendanceGroup';
+    final key = buildKey(
+      id: id,
+      type: type,
+      attendanceGroup: attendanceGroup,
+    );
+    // debugPrint("💬 Upserted chat:attendanceGroup $key");
+    return key;
   }
 }

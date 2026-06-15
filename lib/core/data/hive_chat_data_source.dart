@@ -89,9 +89,13 @@ class HiveChatDataSource {
     return chats;
   }
 
-  ChatHiveModel? getChatById(String id, String type, bool attendance_group) {
+  ChatHiveModel? getChatById(String id, String type, dynamic attendance_group) {
     _ensureInitialized();
-    final key =attendance_group == false ? '${type}_$id' : '${type}_$id$attendance_group'  ;
+    final key = ChatHiveModel.buildKey(
+      id: id,
+      type: type,
+      attendanceGroup: attendance_group,
+    );
     return _chatBox!.get(key);
   }
 
@@ -159,7 +163,11 @@ class HiveChatDataSource {
   }) async {
     _ensureInitialized();
     
-    final key =  attendanceGroup == false ? '${chatType}_$chatId': '${chatType}_$chatId$attendanceGroup';
+    final key = ChatHiveModel.buildKey(
+      id: chatId,
+      type: chatType,
+      attendanceGroup: attendanceGroup,
+    );
     final chat = _chatBox!.get(key);
     if (chat != null) {
       final newUnreadCount = incrementUnread ? chat.unreadCount + 1 : chat.unreadCount;
@@ -206,10 +214,14 @@ class HiveChatDataSource {
     debugPrint('💬 Upserted chat: ${chat.name} (key: $key)');
   }
 
-  Future<void> updateUnreadCount(String chatId, String chatType, int count, bool attendance_group) async {
+  Future<void> updateUnreadCount(String chatId, String chatType, int count, dynamic attendance_group) async {
     _ensureInitialized();
     
-    final key = '${chatType}_$chatId';
+    final key = ChatHiveModel.buildKey(
+      id: chatId,
+      type: chatType,
+      attendanceGroup: attendance_group,
+    );
     final chat = _chatBox!.get(key);
     if (chat != null) {
       final updated = chat.copyWith(unreadCount: count);
@@ -217,10 +229,19 @@ class HiveChatDataSource {
     }
   }
 
-  Future<void> togglePinChat(String chatId, String chatType, bool isPinned) async {
+  Future<void> togglePinChat(
+    String chatId,
+    String chatType,
+    bool isPinned, {
+    dynamic attendanceGroup = false,
+  }) async {
     _ensureInitialized();
     
-    final key = '${chatType}_$chatId';
+    final key = ChatHiveModel.buildKey(
+      id: chatId,
+      type: chatType,
+      attendanceGroup: attendanceGroup,
+    );
     final chat = _chatBox!.get(key);
     if (chat != null) {
       final updated = chat.copyWith(isPinned: isPinned);
@@ -231,9 +252,18 @@ class HiveChatDataSource {
 
   Future<void> deleteChat(String id, String type) async {
     _ensureInitialized();
-    final key = '${type}_$id';
-    await _chatBox!.delete(key);
-    debugPrint('🗑️ Deleted chat: $key');
+    final regularKey = ChatHiveModel.buildKey(
+      id: id,
+      type: type,
+      attendanceGroup: false,
+    );
+    final attendanceKey = ChatHiveModel.buildKey(
+      id: id,
+      type: type,
+      attendanceGroup: true,
+    );
+    await _chatBox!.deleteAll([regularKey, attendanceKey]);
+    debugPrint('🗑️ Deleted chat: $regularKey / $attendanceKey');
   }
 
   Future<void> deleteChatsBatch(List<String> keys) async {

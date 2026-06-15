@@ -1,28 +1,29 @@
 import 'package:app_links/app_links.dart';
+import 'package:dio/dio.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:intl/intl.dart';
 import 'package:package_info_plus/package_info_plus.dart';
-import '../../core/permissions/notification_permission_helper.dart';
+
 import '../../core/models/chat_hive_model.dart';
+import '../../core/permissions/notification_permission_helper.dart';
+import '../../core/services/api_service_simple.dart';
+import '../../core/services/chat_list_manager.dart';
 import '../../core/services/chat_list_update_service.dart';
+import '../../core/services/deep_link_service.dart';
+import '../../core/services/firebase_message_listener.dart';
+import '../../core/services/message_sync_service.dart';
+import '../../core/services/offline_queue_service.dart';
 import '../../core/utils/internet_checker.dart';
 import '../../shared/providers/auth_provider.dart';
 import '../../shared/providers/optimized_chat_provider.dart';
-import '../../shared/widgets/pull_to_refresh.dart';
-import '../../shared/widgets/warning_slider.dart';
 import '../../shared/widgets/cached_profile_image.dart';
-import '../../core/services/deep_link_service.dart';
-import '../../core/services/offline_queue_service.dart';
-import '../../core/services/firebase_message_listener.dart';
-import '../../core/services/chat_list_manager.dart';
-import '../../core/services/message_sync_service.dart';
+import '../../shared/widgets/pull_to_refresh.dart';
 import '../../shared/widgets/update_dialog.dart';
-import '../../core/services/api_service_simple.dart';
-import 'package:dio/dio.dart';
+import '../../shared/widgets/warning_slider.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -107,7 +108,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     try {
       final chatId =
           data['chat_id']?.toString() ?? data['group_id']?.toString();
-      final attendanceGroup = data['attendance_group'] ;
+      final attendanceGroup =
+          ChatHiveModel.parseAttendanceGroup(data['attendance_group']);
       final chatType = data['chat_type']?.toString() ??
           (data['group_id'] != null ? 'group' : 'user');
       final messageText = data['message']?.toString() ??
@@ -118,7 +120,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ref.read(optimizedChatProvider.notifier).updateChatWithMessage(
               chatId: chatId,
               chatType: chatType,
-          attendanceGroup: attendanceGroup,
+              attendanceGroup: attendanceGroup,
               lastMessage: messageText,
               lastMessageTime: DateTime.now(),
               isIncoming: true,
@@ -289,7 +291,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         child: Column(
           children: [
             _buildQueueStatusBanner(),
-            WarningSlider(),
+            const WarningSlider(),
             Expanded(
               child: _buildChatsList(chatState),
             ),
@@ -470,6 +472,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         addRepaintBoundaries: true,
         itemBuilder: (context, index) {
           final chat = chatState.chats[index];
+          if(index == 1){
+            debugPrint("Groupchat.attendanceGroup ${chat.toJson()}");
+            debugPrint("Groupchat.attendanceGroup ${chat.attendanceGroup}");
+
+          }
+
           return _buildChatTile(chat);
         },
       ),
@@ -477,7 +485,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   Widget _buildChatTile(chat) {
-    return ListTile(
+    return chat.id == '' ||  chat.name == 'Unknown' ? SizedBox() : ListTile(
       onTap: () async {
         // Mark as read immediately for smooth UX
         if (chat.unreadCount > 0) {
@@ -485,6 +493,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               .read(optimizedChatProvider.notifier)
               .markAsRead(chat.id, chat.type, chat.attendanceGroup);
         }
+
         debugPrint("Groupchat.attendanceGroup ${chat.toString()}");
         debugPrint("Groupchat.attendanceGroup ${chat.attendanceGroup}");
 
@@ -556,7 +565,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         children: [
           Expanded(
             child: Text(
-              chat.lastMessage ?? 'Tap to start chatting',
+              // chat.lastMessage ?? 'Tap to start chatting',
+               'Tap to start chatting',
               style: TextStyle(
                 color: chat.unreadCount > 0 ? Colors.black87 : Colors.grey[600],
                 fontWeight:
@@ -595,7 +605,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final difference = now.difference(timestamp);
 
     if (difference.inDays == 0) {
-      return DateFormat('HH:mm').format(timestamp);
+      return DateFormat('hh:mm a').format(timestamp);
     } else if (difference.inDays == 1) {
       return 'Yesterday';
     } else if (difference.inDays < 7) {
@@ -618,9 +628,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   chat.isPinned ? Icons.push_pin_outlined : Icons.push_pin),
               title: Text(chat.isPinned ? 'Unpin Chat' : 'Pin Chat'),
               onTap: () {
-                ref
-                    .read(optimizedChatProvider.notifier)
-                    .togglePin(chat.id, chat.type, !chat.isPinned);
+                ref.read(optimizedChatProvider.notifier).togglePin(
+                      chat.id,
+                      chat.type,
+                      !chat.isPinned,
+                      attendanceGroup: chat.attendanceGroup == true,
+                    );
                 Navigator.pop(context);
               },
             ),

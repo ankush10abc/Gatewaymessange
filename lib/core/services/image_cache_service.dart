@@ -14,10 +14,18 @@ class ImageCacheService {
   String? _cacheDir;
 
   Future<void> initialize() async {
+    if (_cacheDir != null) return;
+
     final dir = await getApplicationDocumentsDirectory();
     _cacheDir = '${dir.path}/chat_images';
     await Directory(_cacheDir!).create(recursive: true);
     debugPrint('🖼️ Image cache initialized: $_cacheDir');
+  }
+
+  Future<void> _ensureInitialized() async {
+    if (_cacheDir == null) {
+      await initialize();
+    }
   }
 
   String _getCacheFileName(String url) {
@@ -28,8 +36,9 @@ class ImageCacheService {
 
   Future<String?> downloadAndCache(String? imageUrl) async {
     if (imageUrl == null || imageUrl.isEmpty) return null;
-    
+
     try {
+      await _ensureInitialized();
       final fileName = _getCacheFileName(imageUrl);
       final filePath = '$_cacheDir/$fileName';
       final file = File(filePath);
@@ -49,6 +58,27 @@ class ImageCacheService {
     }
   }
 
+  Future<String?> cacheLocalFileForUrl(String? imageUrl, File sourceFile) async {
+    if (imageUrl == null || imageUrl.isEmpty) return null;
+    if (!await sourceFile.exists()) return null;
+
+    try {
+      await _ensureInitialized();
+      final fileName = _getCacheFileName(imageUrl);
+      final filePath = '$_cacheDir/$fileName';
+      final cachedFile = File(filePath);
+
+      if (await cachedFile.exists()) return filePath;
+
+      await sourceFile.copy(filePath);
+      debugPrint('💾 Local image cached: $filePath');
+      return filePath;
+    } catch (e) {
+      debugPrint('❌ Local image cache failed: $e');
+      return null;
+    }
+  }
+
   Future<void> clearCache() async {
     if (_cacheDir == null) return;
     final dir = Directory(_cacheDir!);
@@ -61,12 +91,13 @@ class ImageCacheService {
 
   String? getCachedImagePath(String? imageUrl) {
     if (imageUrl == null || imageUrl.isEmpty) return null;
+    if (_cacheDir == null) return null;
     if (imageUrl.startsWith('/')) return imageUrl; // Already local path
-    
+
     final fileName = _getCacheFileName(imageUrl);
     final filePath = '$_cacheDir/$fileName';
     final file = File(filePath);
-    
+
     return file.existsSync() ? filePath : null;
   }
 }

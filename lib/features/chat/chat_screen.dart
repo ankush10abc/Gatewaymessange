@@ -8,6 +8,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -17,17 +18,21 @@ import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:scroll_to_index/scroll_to_index.dart';
 
+import '../../core/models/chat_hive_model.dart';
 import '../../core/models/chat_model.dart';
 import '../../core/models/message_model.dart';
+import '../../core/services/active_chat_tracker.dart';
 import '../../core/services/api_service_simple.dart';
+import '../../core/services/chat_list_update_service.dart';
+import '../../core/services/chat_metadata_service.dart';
 import '../../core/services/firebase_realtime_service.dart';
+// NEW: Import message sync service
+import '../../core/services/message_sync_service.dart';
 import '../../core/services/whatsapp_text_parser.dart';
 import '../../core/storage/storage_service.dart';
 import '../../core/utils/internet_checker.dart';
 import '../../shared/providers/auth_provider.dart';
 import '../../shared/providers/chat_provider.dart';
-import '../../core/services/chat_list_update_service.dart';
-import '../../core/services/active_chat_tracker.dart';
 import '../../shared/widgets/document_preview_screen.dart';
 import '../../shared/widgets/enhanced_message_input.dart';
 import '../../shared/widgets/forward_message_dialog.dart';
@@ -38,9 +43,6 @@ import '../../shared/widgets/video_preview_screen.dart';
 import '../../shared/widgets/video_thumbnail.dart';
 import 'mark_attendance_screen.dart';
 import 'user_detail_screen.dart';
-
-// NEW: Import message sync service
-import '../../core/services/message_sync_service.dart';
 
 class ChatScreen extends ConsumerStatefulWidget {
   final String chatId;
@@ -74,6 +76,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   // NEW: Message sync service for instant loading
   final MessageSyncService _syncService = MessageSyncService();
+  final ChatMetadataService _metadataService = ChatMetadataService();
   StreamSubscription<List<Message>>? _cacheSubscription;
 
   // Real-time state
@@ -93,6 +96,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   bool _isLoadingPermissions = true;
   String? _highlightedMessageId;
   bool _initialMessageSent = false;
+  // Track recently sent message IDs to prevent duplicates from Firebase listener
   bool _isSearching = false;
   String _searchQuery = '';
   List<Message> _searchResults = [];
@@ -120,8 +124,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ApiService.setContext(context);
-      _isAttendanceGroup = widget.attendance_group;
+      _isAttendanceGroup =
+          ChatHiveModel.parseAttendanceGroup(widget.attendance_group);
       getUserRole();
+
       _initializeChat();
       _handleInitialMessage();
     });
@@ -133,7 +139,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   void getUserRole() {
     final user = ref.read(authProvider).user;
     if (user == null) return;
-    debugPrint("AnkushuserRole ${user.toJson()}");
+    debugPrint("AnkushuserRole two ${user.toJson()}");
     // Ankush revert
     userRole = user.actual_role.toLowerCase();
     if (userRole == 'no user') {
@@ -255,70 +261,95 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   }
 
   Future<void> _initializeChat() async {
+    debugPrint('📴 Offline - skipping Firebase presence update');
     final user = ref.read(authProvider).user;
+    debugPrint('📴 Offline - skipping Firebase presence update$user');
     if (user == null) return;
 
     _currentUserId = user.id;
-
+    await _initializeAuth();
+    debugPrint('AnkushuserRole three $user');
     try {
-      await FirebaseRealtimeService.setUserOnline(user.id);
-      await _loadInitialMessages();
+      // Check internet before Firebase operations
+      final hasInternet = await InternetChecker.hasInternet();
+      debugPrint('AnkushuserRole five $hasInternet');
+      try {
+        if (hasInternet) {
+          await _loadInitialMessages();
+          await FirebaseRealtimeService.setUserOnline(user.id);
+        } else {
+          await _loadInitialMessages();
+          debugPrint('📴 Offline - skipping Firebase presence update');
+        }
+      } catch (e) {
+        print(e);
+      }
+      debugPrint('AnkushuserRole four $user');
 
       debugPrint(
           "🔥 _setupRealtimeListeners check: attendance_group=$_isAttendanceGroup");
-      // Setup Firebase listeners for non-attendance groups
-      // Attendance group flag is now set in _loadInitialMessages()
-      if (_isAttendanceGroup != true) {
+
+      // Setup Firebase listeners ONLY if online and not attendance group
+      if (hasInternet && _isAttendanceGroup != true) {
         debugPrint("✅ Setting up Firebase listeners for regular chat");
         _setupRealtimeListeners();
+      } else if (!hasInternet) {
+        debugPrint("📴 Offline - skipping Firebase listeners");
       } else {
         debugPrint("⏭️ Skipping Firebase listeners for attendance group");
       }
 
-      // Start background sync for API (every 30 seconds)
-      _syncService.startBackgroundSync(
-        chatId: widget.chatId,
-        chatType: widget.chatType,
-        apiService: _apiService,
-        currentUserId: _currentUserId,
-        userRole: _userRoleCache,
-        isAttendanceGroup: _isAttendanceGroup,
-        otherUserId: _firebaseOtherUserId,
-      );
+      // Start background sync ONLY if online
+      if (hasInternet) {
+        _syncService.startBackgroundSync(
+          chatId: widget.chatId,
+          chatType: widget.chatType,
+          apiService: _apiService,
+          currentUserId: _currentUserId,
+          userRole: _userRoleCache,
+          isAttendanceGroup: _isAttendanceGroup,
+          otherUserId: _firebaseOtherUserId,
+        );
+      } else {
+        debugPrint('📴 Offline - skipping background sync');
+      }
 
       ref.read(chatProvider.notifier).resetUnreadCount(widget.chatId);
 
-      Future.delayed(const Duration(milliseconds: 300), () {
-        if (mounted) {
-          FirebaseRealtimeService.markMessagesAsRead(
-              widget.chatType, widget.chatId, user.id,
-              currentUserId: _currentUserId,
-              otherUserId: _firebaseOtherUserId,
-              attendanceGroup: _isAttendanceGroup,
-              groupMembers: widget.chatType == 'group' && _user != null
-                  ? _user!['member_list']
-                  : null);
+      // Mark messages as read ONLY if online
+      if (hasInternet) {
+        Future.delayed(const Duration(milliseconds: 300), () {
+          if (mounted) {
+            FirebaseRealtimeService.markMessagesAsRead(
+                widget.chatType, widget.chatId, user.id,
+                currentUserId: _currentUserId,
+                otherUserId: _firebaseOtherUserId,
+                attendanceGroup: _isAttendanceGroup,
+                groupMembers: widget.chatType == 'group' && _user != null
+                    ? _user!['member_list']
+                    : null);
 
-          // Update chat list to reset unread count
-          ChatListUpdateService.updateOnMessageReceived(
-            chatId: widget.chatId,
-            chatType: widget.chatType,
-            attendanceGroup: widget.attendance_group ?? false,
-            lastMessage: _messages.isNotEmpty ? _messages.first.text : '',
-            incrementUnread: false,
-          );
-        }
-      });
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _isLoadingOldMessages = false;
+            // Update chat list to reset unread count
+            ChatListUpdateService.updateOnMessageReceived(
+              chatId: widget.chatId,
+              chatType: widget.chatType,
+              attendanceGroup: _isAttendanceGroup == true,
+              lastMessage: _messages.isNotEmpty ? _messages.first.text : '',
+              incrementUnread: false,
+            );
+          }
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to initialize chat: $e')),
-        );
       }
-      debugPrint('Error in _initializeChat: $e');
+    } catch (e) {
+      // if (mounted) {
+      //   setState(() {
+      //     _isLoadingOldMessages = false;
+      //   });
+      //   ScaffoldMessenger.of(context).showSnackBar(
+      //     SnackBar(content: Text('Failed to initialize chat: $e')),
+      //   );
+      // }
+      // debugPrint('Error in _initializeChat: $e');
     }
 
     Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
@@ -337,26 +368,41 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     try {
       final nextPage = pageCount + 1;
 
-      final olderMessages = await _syncService.loadMoreMessages(
-        chatId: widget.chatId,
-        chatType: widget.chatType,
-        apiService: _apiService,
-        currentUserId: _currentUserId,
-        userRole: _userRoleCache,
-        isAttendanceGroup: _isAttendanceGroup,
-        page: nextPage,
-        limit: ApiService.messageCount,
-      );
+      final syncedMessages = _isAttendanceGroup == true
+          ? await _syncService.syncAttendanceGroupFromApi(
+              chatId: widget.chatId,
+              apiService: _apiService,
+              currentUserId: _currentUserId,
+              userRole: _userRoleCache,
+              page: nextPage,
+              limit: ApiService.messageCount,
+              append: true,
+            )
+          : await _syncService.loadMoreMessages(
+              chatId: widget.chatId,
+              chatType: widget.chatType,
+              apiService: _apiService,
+              currentUserId: _currentUserId,
+              userRole: _userRoleCache,
+              isAttendanceGroup: _isAttendanceGroup,
+              page: nextPage,
+              limit: ApiService.messageCount,
+            );
 
       if (mounted) {
         setState(() {
-          _messages.insertAll(0, olderMessages);
+          debugPrint("AnkushuserRole syncedMessages $syncedMessages");
+          if (_isAttendanceGroup == true) {
+            _messages.insertAll(0, syncedMessages);
+          } else {
+            _messages.insertAll(0, syncedMessages);
+          }
           _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
           pageCount = nextPage;
           _isLoadingOldMessages = false;
         });
         debugPrint(
-            '✅ Loaded page $nextPage with ${olderMessages.length} messages');
+            '✅ Loaded page $nextPage with ${syncedMessages.length} messages');
       }
     } catch (e) {
       if (mounted) {
@@ -364,7 +410,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           _isLoadingOldMessages = false;
         });
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to load old messages: $e')),
+          const SnackBar(
+              content: Text(
+                  'Failed to load old messages: Check Internet Connection ')),
         );
       }
     }
@@ -382,13 +430,48 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   }
 
   void _hydrateChatMetadataFromRoute() {
-    _isAttendanceGroup ??= widget.attendance_group;
+    _isAttendanceGroup ??=
+        ChatHiveModel.parseAttendanceGroup(widget.attendance_group);
     _user ??= {
       'id': widget.chatId,
       'name': widget.chatName,
       'attendance_group': _isAttendanceGroup,
       if (widget.chatType == 'group') 'member_list': <dynamic>[],
     };
+  }
+
+  Future<void> _loadCachedConversationMetadata() async {
+    Map<String, dynamic>? cachedMetadata =
+        await _syncService.getCachedChatMetadata(
+      widget.chatId,
+      widget.chatType,
+      isAttendanceGroup: _isAttendanceGroup,
+    );
+
+    if (cachedMetadata == null &&
+        widget.chatType == 'group' &&
+        _isAttendanceGroup != true) {
+      cachedMetadata = await _syncService.getCachedChatMetadata(
+        widget.chatId,
+        widget.chatType,
+        isAttendanceGroup: true,
+      );
+    }
+
+    if (cachedMetadata == null || !mounted) {
+      debugPrint('⚠️ No cached metadata found for chat ${widget.chatId}');
+      return;
+    }
+
+    setState(() {
+      _user = cachedMetadata;
+      _isAttendanceGroup = ChatHiveModel.parseAttendanceGroup(
+        cachedMetadata?['attendance_group'] ?? _isAttendanceGroup,
+      );
+    });
+
+    debugPrint(
+        '✅ Loaded cached metadata: name=${_user?['name']}, attendance=$_isAttendanceGroup');
   }
 
   void _setupCacheWatcher() {
@@ -402,6 +485,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       isAttendanceGroup: _isAttendanceGroup,
     )
         .listen((cachedMessages) {
+      // debugPrint("Amnkush cachedMessages $cachedMessages");
       if (!mounted) return;
       if (cachedMessages.isEmpty && _messages.isNotEmpty) return;
 
@@ -418,64 +502,93 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   Future<void> _loadInitialMessages() async {
     try {
+      // Step 1: Load metadata from route and cache FIRST
       _hydrateChatMetadataFromRoute();
+      await _loadCachedConversationMetadata(); // Sets _isAttendanceGroup
+
+      // Step 2: Setup cache watcher AFTER metadata is loaded
       _setupCacheWatcher();
 
-      if (widget.attendance_group == false) {
-
-
+      // Step 3: Load cached messages IMMEDIATELY (offline-first)
       final cachedMessages = await _syncService.getCachedMessages(
         widget.chatId,
         widget.chatType,
         currentUserId: _currentUserId,
         userRole: _userRoleCache,
-        isAttendanceGroup: widget.attendance_group,
+        isAttendanceGroup: _isAttendanceGroup,
       );
 
+      // Step 4: Display cached messages instantly and ALWAYS hide loader
       if (mounted) {
         setState(() {
-          if (cachedMessages.isNotEmpty) {
-            _messages = cachedMessages;
-          }
-          _isLoadingPermissions = false;
+          _messages = cachedMessages; // Always set, even if empty
+          _isLoadingPermissions = false; // ✅ ALWAYS hide loader, even offline
         });
       }
 
-      debugPrint('⚡ Chat opened with ${cachedMessages.length} cached messages');
+      debugPrint(
+          '⚡ Chat opened with ${cachedMessages.length} cached messages (offline-first)');
+      if (cachedMessages.isNotEmpty) {
+        debugPrint('💬 First message: ${cachedMessages.first.text}');
+      }
 
+      // Step 5: Check internet - CRITICAL DECISION POINT
+      final hasInternet = await InternetChecker.hasInternet();
+
+      if (!hasInternet) {
+        debugPrint(
+            '📴 OFFLINE MODE - Using cached data only (${cachedMessages.length} messages)');
+        // Don't call any API or Firebase - stay completely offline
+        return;
+      }
+
+      debugPrint('🌐 ONLINE MODE - Syncing with API and Firebase');
+
+      // Step 6: Online sync in background (non-blocking)
       if (_isAttendanceGroup == true) {
-        unawaited(_loadConversationMetadataFromApi(
-          shouldLoadAttendanceMessages: true,
+        unawaited(_syncAttendanceGroupFromApi(
+          append: cachedMessages.isNotEmpty,
         ));
       } else {
+        // Sync recent Firebase messages in background
         _warmRecentMessagesInBackground(
           shouldFallbackToApiMessages: cachedMessages.isEmpty,
         );
-        unawaited(_loadConversationMetadataFromApi(
-          shouldFallbackToApiMessages: false,
-        ));
+        // Load metadata from API (non-blocking)
+        if (hasInternet) {
+          unawaited(_loadConversationMetadataFromApi(
+            shouldFallbackToApiMessages: false,
+          ));
+        }
       }
-    }
     } catch (e) {
       debugPrint('❌ Load initial messages error: $e');
       if (mounted) {
         setState(() {
-          _isLoadingPermissions = false;
+          _isLoadingPermissions = false; // ✅ Hide loader on error too
         });
       }
     }
   }
 
+  //
   void _warmRecentMessagesInBackground({
     required bool shouldFallbackToApiMessages,
   }) {
     unawaited(() async {
+      // Check internet before syncing
+      final hasInternet = await InternetChecker.hasInternet();
+      if (!hasInternet) {
+        debugPrint('📴 Skipping Firebase sync - offline');
+        return;
+      }
+
       final firebaseMessages = await _syncService.syncRecentFirebaseMessages(
         chatId: widget.chatId,
         chatType: widget.chatType,
         currentUserId: _currentUserId,
         userRole: _userRoleCache,
-        isAttendanceGroup: widget.attendance_group,
+        isAttendanceGroup: _isAttendanceGroup,
         otherUserId: _firebaseOtherUserId,
         limit: ApiService.messageCount,
       );
@@ -485,19 +598,73 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           firebaseMessages.isNotEmpty) {
         return;
       }
-
-      await _loadConversationMetadataFromApi(
-        shouldFallbackToApiMessages: true,
-      );
+      if (hasInternet) {
+        await _loadConversationMetadataFromApi(
+          shouldFallbackToApiMessages: true,
+        );
+      }
     }());
+  }
+
+  Future<void> _syncAttendanceGroupFromApi({bool append = true}) async {
+    if (widget.chatType != 'group') return;
+
+    // Check internet before API call
+    final hasInternet = await InternetChecker.hasInternet();
+    if (!hasInternet) {
+      debugPrint('📴 Skipping attendance group sync - offline');
+      return;
+    }
+
+    try {
+      final cachedMessages = await _syncService.syncAttendanceGroupFromApi(
+        chatId: widget.chatId,
+        apiService: _apiService,
+        currentUserId: _currentUserId,
+        userRole: _userRoleCache,
+        page: 1,
+        limit: ApiService.messageCount,
+        append: append,
+      );
+
+      final cachedMetadata = await _syncService.getCachedChatMetadata(
+        widget.chatId,
+        widget.chatType,
+        isAttendanceGroup: true,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        if (cachedMetadata != null) {
+          _user = cachedMetadata;
+        }
+        _isAttendanceGroup = true;
+        _messages = cachedMessages;
+        _isLoadingPermissions = false;
+      });
+
+      _setupCacheWatcher();
+    } catch (e) {
+      debugPrint('❌ Attendance group API sync failed: $e');
+      if (mounted) {
+        setState(() {
+          _isLoadingPermissions = false;
+        });
+      }
+    }
   }
 
   Future<void> _loadConversationMetadataFromApi({
     bool shouldLoadAttendanceMessages = false,
     bool shouldFallbackToApiMessages = false,
   }) async {
+    // Check internet before API call
     final hasInternet = await InternetChecker.hasInternet();
-    if (!hasInternet) return;
+    if (!hasInternet) {
+      debugPrint('📴 Skipping API metadata load - offline');
+      return;
+    }
 
     try {
       final id = int.parse(widget.chatId);
@@ -520,19 +687,31 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
       if (!mounted) return;
 
-      final attendanceValue = userData['attendance_group'];
-      final isAttendance = attendanceValue == true ||
-          attendanceValue == 1 ||
-          attendanceValue?.toString().toLowerCase() == 'true';
+      final isAttendance = ChatHiveModel.parseAttendanceGroup(
+        userData['attendance_group'],
+      );
       final previousAttendanceGroup = _isAttendanceGroup;
+      userData['attendance_group'] = isAttendance;
 
       setState(() {
         _user = userData;
         _isAttendanceGroup = isAttendance;
       });
 
+      await _syncService.saveChatMetadataToCache(
+        chatId: widget.chatId,
+        chatType: widget.chatType,
+        metadata: userData,
+        isAttendanceGroup: _isAttendanceGroup,
+      );
+
       if (previousAttendanceGroup != _isAttendanceGroup) {
         _setupCacheWatcher();
+      }
+
+      if (_isAttendanceGroup == true) {
+        await _syncAttendanceGroupFromApi(append: _messages.isNotEmpty);
+        return;
       }
 
       if ((shouldLoadAttendanceMessages || shouldFallbackToApiMessages) &&
@@ -548,9 +727,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           append: true,
         );
 
+        final cachedMessages = await _syncService.getCachedMessages(
+          widget.chatId,
+          widget.chatType,
+          currentUserId: _currentUserId,
+          userRole: _userRoleCache,
+          isAttendanceGroup: _isAttendanceGroup,
+        );
+
         if (mounted) {
           setState(() {
-            _messages = messages;
+            _messages = cachedMessages;
           });
         }
       }
@@ -570,36 +757,84 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         isAttendanceGroup: _isAttendanceGroup,
         otherUserId: _firebaseOtherUserId,
         onMessages: (realtimeMessages) {
-          debugPrint("AnkushrealtimeMessages ${realtimeMessages.first}");
-          if (realtimeMessages.isNotEmpty && mounted) {
-            final previousLength = _messages.length;
-            setState(() {
-              // Use cached _isAttendanceGroup flag for consistency
-              if (_isAttendanceGroup == true) {
-                _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-              } else {
-                _messages = _mergeMessages(_messages, realtimeMessages);
+          debugPrint(
+              "🔥 Firebase messages received: ${realtimeMessages.length} messages");
+
+          if (realtimeMessages.isEmpty || !mounted) return;
+
+          // Filter out messages that were just sent by current user
+          // to prevent duplicates from optimistic UI updates
+          final filteredMessages = realtimeMessages.where((msg) {
+            // Always keep messages from other users
+            if (msg.senderId != _currentUserId) return true;
+            
+            // For own messages: Skip if already exists in UI
+            // Check by firebase ID or by timestamp (within 5 seconds)
+            final firebaseId = msg.firebaseId ?? msg.id;
+            final isDuplicate = _messages.any((existing) {
+              // Match by firebase ID
+              final existingFirebaseId = existing.firebaseId ?? existing.id;
+              if (firebaseId == existingFirebaseId) return true;
+              
+              // Match by timestamp + sender (for messages sent in last 10 seconds)
+              if (existing.senderId == msg.senderId &&
+                  existing.text == msg.text &&
+                  existing.timestamp.difference(msg.timestamp).abs().inSeconds < 10) {
+                return true;
               }
+              
+              return false;
             });
-
-            if (_messages.length > previousLength &&
-                realtimeMessages.isNotEmpty) {
-              final newMessage = realtimeMessages.first;
-              if (newMessage.senderId != _currentUserId) {
-                ref.read(chatProvider.notifier).onMessageReceived(
-                      widget.chatId,
-                      widget.chatType,
-                      newMessage,
-                      true,
-                    );
-              }
+            
+            if (isDuplicate) {
+              debugPrint('⏭️ Skipping duplicate message from Firebase: $firebaseId');
+              return false;
             }
+            
+            return true;
+          }).toList();
 
-            if (_isAtBottom && _messages.length > previousLength) {
-              Future.delayed(
-                  const Duration(milliseconds: 100), _scrollToBottom);
+          if (filteredMessages.isEmpty) {
+            debugPrint('🚫 [FIREBASE] All messages filtered out as duplicates');
+            return;
+          }
+
+          final previousLength = _messages.length;
+          debugPrint('🟡 [FIREBASE] Before merge: ${_messages.length} messages, adding ${filteredMessages.length} new');
+
+          setState(() {
+            // Merge messages based on chat type
+            if (_isAttendanceGroup == true) {
+              _messages = filteredMessages;
+              _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+            } else {
+              _messages = _mergeMessages(_messages, filteredMessages);
+            }
+          });
+
+          debugPrint('🟢 [FIREBASE] After merge: ${_messages.length} messages (was $previousLength)');
+          // Handle new incoming message
+          if (_messages.length > previousLength &&
+              filteredMessages.isNotEmpty) {
+            final newMessage = filteredMessages.first;
+
+            // Update chat list if message is from another user
+            if (newMessage.senderId != _currentUserId) {
+              ref.read(chatProvider.notifier).onMessageReceived(
+                    widget.chatId,
+                    widget.chatType,
+                    newMessage,
+                    true,
+                  );
             }
           }
+
+          // Auto-scroll to bottom if user is at bottom
+          if (_isAtBottom && _messages.length > previousLength) {
+            Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
+          }
+
+          debugPrint('✅ UI updated with ${_messages.length} total messages');
         });
 
     _typingSubscription = FirebaseRealtimeService.getTypingUsers(
@@ -648,7 +883,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
     final user = ref.read(authProvider).user;
     if (user == null) return false;
-    debugPrint("AnkushuserRole ${user.toJson()}");
+    debugPrint("AnkushuserRole one ${user.toJson()}");
     // Ankush revert
     var userRole = user.actual_role.toLowerCase();
     if (userRole == 'no user') {
@@ -659,7 +894,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         _user!['message_permission']?.toString().toLowerCase();
 
     debugPrint(
-        "AnkushuserRole _canSendMessage messagePermission ${messagePermission} isLocked $isLocked  userRole $userRole");
+        "AnkushuserRole _canSendMessage messagePermission $messagePermission isLocked $isLocked  userRole $userRole");
     if (isLocked) {
       return userRole == 'admin';
     }
@@ -685,6 +920,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   List<Message> _mergeMessages(
       List<Message> apiMessages, List<Message> realtimeMessages) {
+    // debugPrint('🔀 [MERGE] Starting merge: ${apiMessages.length} existing + ${realtimeMessages.length} new');
+    
     final messageMap = <String, Message>{};
     final firebaseIdToItem = <String, Message>{};
 
@@ -693,6 +930,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       final key = message.firebaseId ?? message.id;
       if (key.isNotEmpty) {
         messageMap[key] = message;
+        // debugPrint('🔀 [MERGE] Existing: key=$key, id=${message.id}, fbId=${message.firebaseId}');
       }
     }
 
@@ -706,10 +944,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           orElse: () => '',
         );
         if (tempKey.isNotEmpty) {
+          // debugPrint('🔀 [MERGE] Removing temp message: $tempKey');
           messageMap.remove(tempKey);
         }
+        // debugPrint('🔀 [MERGE] Adding new: key=$firebaseId, id=${message.id}');
         messageMap[firebaseId] = message;
       } else if (message.id.startsWith('temp_')) {
+        // debugPrint('🔀 [MERGE] Keeping temp: ${message.id}');
         messageMap[message.id] = message;
       }
     }
@@ -720,16 +961,20 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       if (firebaseId != null && firebaseId.isNotEmpty) {
         if (item.id != '0' && !item.id.startsWith('temp_')) {
           firebaseIdToItem[firebaseId] = item;
+          // debugPrint('🔀 [MERGE] Final: Added fbId=$firebaseId, id=${item.id}');
         } else if (!firebaseIdToItem.containsKey(firebaseId)) {
           firebaseIdToItem[firebaseId] = item;
+          // debugPrint('🔀 [MERGE] Final: Added fbId=$firebaseId (fallback), id=${item.id}');
         }
       } else if (item.id.startsWith('temp_')) {
         firebaseIdToItem[item.id] = item;
+        // debugPrint('🔀 [MERGE] Final: Kept temp=${item.id}');
       }
     }
 
     final mergedList = firebaseIdToItem.values.toList();
     mergedList.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    // debugPrint('🔀 [MERGE] Complete: ${mergedList.length} total messages');
     return mergedList;
   }
 
@@ -1029,7 +1274,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     String? fileUrl,
     String? fileName,
     int? fileSize,
-  }) async {
+  }
+  ) async
+  {
+    print("neewnwnwnwaaaa ${text}");
     if (_currentUserId == null) return;
 
     final messageText = text ?? fileName ?? '';
@@ -1039,6 +1287,28 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
     final tempId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
     final user = ref.read(authProvider).user!;
+
+    // Extract reply message ID (use msgId or id, but skip temp IDs)
+    String? replyToMessageId;
+    if (_replyToMessage != null) {
+      // Prefer msgId (server ID), fallback to id if it's not a temp ID
+      if (_replyToMessage!.msgId != null && _replyToMessage!.msgId!.isNotEmpty) {
+        replyToMessageId = _replyToMessage!.msgId;
+      } else if (_replyToMessage!.id.isNotEmpty && !_replyToMessage!.id.startsWith('temp_')) {
+        replyToMessageId = _replyToMessage!.id;
+      } else {
+        // Replying to a message that hasn't been sent yet - wait for it to send
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Please wait for the previous message to send before replying'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        }
+        return;
+      }
+    }
 
     final message = Message(
       id: tempId,
@@ -1052,26 +1322,29 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       fileUrl: fileUrl,
       fileName: fileName,
       fileSize: fileSize,
+      replyToId: replyToMessageId,
       replyToMessage: _replyToMessage,
     );
 
+    print("neewnwnwnwaaaa ${message.toJson()}");
     // Optimistic UI update - add message immediately
     if (mounted) {
       setState(() {
         _messages.insert(0, message);
         _replyToMessage = null;
+        debugPrint('🟢 [SEND] Step 1: Added temp message. Total messages: ${_messages.length}');
       });
     }
 
-    // Cache message immediately
-    await _syncService.addMessageToCache(
-      widget.chatId,
-      widget.chatType,
-      message,
-      currentUserId: _currentUserId,
-      userRole: _userRoleCache,
-      isAttendanceGroup: _isAttendanceGroup,
-    );
+    // Cache message immediately with reply data
+    // await _syncService.addMessageToCache(
+    //   widget.chatId,
+    //   widget.chatType,
+    //   message,
+    //   currentUserId: _currentUserId,
+    //   userRole: _userRoleCache,
+    //   isAttendanceGroup: _isAttendanceGroup,
+    // );
 
     _messageController.clear();
     FirebaseRealtimeService.setTyping(
@@ -1081,6 +1354,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
     try {
       final sentMessage = await _sendToAPI(message);
+      
+      // Replace temp message with real message in cache
       await _syncService.replaceMessageInCache(
         widget.chatId,
         widget.chatType,
@@ -1091,12 +1366,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         isAttendanceGroup: _isAttendanceGroup,
       );
 
+      // Update UI: remove temp message and add real message (single setState)
       if (mounted) {
         setState(() {
+          debugPrint('🟡 [SEND] Step 2: Before merge. Messages count: ${_messages.length}');
+          debugPrint('🟡 [SEND] Temp ID: $tempId, Real ID: ${sentMessage.id}, Firebase ID: ${sentMessage.firebaseId}');
+          
           _messages = _mergeMessages(
             _messages.where((item) => item.id != tempId).toList(),
             [sentMessage],
           );
+          
+          debugPrint('🟢 [SEND] Step 2: After merge. Messages count: ${_messages.length}');
         });
       }
 
@@ -1110,7 +1391,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       ChatListUpdateService.updateOnMessageSent(
         chatId: widget.chatId,
         chatType: widget.chatType,
-        attendanceGroup: widget.attendance_group ?? false,
+        attendanceGroup: _isAttendanceGroup == true,
         lastMessage: messageText,
         senderId: _currentUserId,
         senderName: user.name,
@@ -1201,6 +1482,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   }
 
   void _updateMessageStatus(String messageId, String status) {
+    debugPrint('🔄 [STATUS] Updating message $messageId status to: $status');
     setState(() {
       _messages = _messages.map((msg) {
         if (msg.id == messageId) {
@@ -1898,6 +2180,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     // final messageState = ref.watch(messageProvider);
     final user = ref.watch(authProvider).user!;
 
+    // debugPrint("_messages six $_messages");
+    // debugPrint("_messages six ${_messages.length}");
+
     return SafeArea(
       child: PopScope(
         canPop: false,
@@ -2039,7 +2324,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                           children: [
                             Icon(Icons.search,
                                 color: Theme.of(context).iconTheme.color),
-                            SizedBox(width: 8),
+                            const SizedBox(width: 8),
                             Text('Search',
                                 style: TextStyle(
                                     color: Theme.of(context)
@@ -2081,7 +2366,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                               ),
                               contentPadding: const EdgeInsets.symmetric(
                                   horizontal: 16, vertical: 8),
-                              suffixStyle: TextStyle(color: Colors.red),
+                              suffixStyle: const TextStyle(color: Colors.red),
                               suffixText: _searchResults.isEmpty
                                   ? '0/0'
                                   : '${_currentSearchIndex + 1}/${_searchResults.length}',
@@ -2128,11 +2413,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                   child: Stack(
                     children: [
                       ListView.builder(
+                        scrollCacheExtent: const ScrollCacheExtent.pixels(500),
                         controller: _scrollController,
                         padding: const EdgeInsets.all(8),
-                        reverse: true,
-                        cacheExtent:
-                            500, // Cache more items for smoother scrolling
+                        reverse:
+                            true, // Cache more items for smoother scrolling
                         itemCount:
                             _messages.length + (_isLoadingOldMessages ? 1 : 0),
                         itemBuilder: (context, index) {
@@ -2255,7 +2540,23 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                         padding: const EdgeInsets.only(bottom: 8.0),
                         child: EnhancedMessageInput(
                           controller: _messageController,
-                          onSendMessage: (text) => _sendMessage(text: text),
+                          onSendMessage: (text) async {
+                            // Check internet before sending
+                            final hasInternet = await InternetChecker.hasInternet();
+                            debugPrint("hasInternet Role $hasInternet");
+                            if (!hasInternet) {
+                              if (mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('No internet connection. Please check your connection.'),
+                                    duration: Duration(seconds: 2),
+                                  ),
+                                );
+                              }
+                              return;
+                            }
+                            _sendMessage(text: text);
+                          },
                           onPickCamera:
                               _canSendAttachments() ? _pickCamera : null,
                           onPickImage:
@@ -2418,7 +2719,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                         ),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withOpacity(0.1),
+                            color: Colors.black.withValues(alpha: 0.1),
                             blurRadius: 2,
                             offset: const Offset(0, 1),
                           ),
@@ -2454,7 +2755,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
           decoration: BoxDecoration(
-            color: Colors.green.withOpacity(0.5),
+            color: Colors.green.withValues(alpha: 0.5),
             borderRadius: BorderRadius.circular(12),
           ),
           child: Text(
@@ -2646,7 +2947,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         margin: const EdgeInsets.only(bottom: 8),
         padding: const EdgeInsets.all(8),
         decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.1),
+          color: Colors.black.withValues(alpha: 0.1),
           borderRadius: BorderRadius.circular(8),
           border: const Border(
             left: BorderSide(color: Colors.green, width: 3),
@@ -2831,7 +3132,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                     end: Alignment.bottomCenter,
                     colors: [
                       Colors.transparent,
-                      Colors.black.withOpacity(0.3),
+                      Colors.black.withValues(alpha: 0.3),
                     ],
                   ),
                 ),
@@ -2996,7 +3297,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         borderRadius: BorderRadius.circular(18),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.1),
+            color: Colors.black.withValues(alpha: 0.1),
             blurRadius: 4,
             offset: const Offset(0, 2),
           ),

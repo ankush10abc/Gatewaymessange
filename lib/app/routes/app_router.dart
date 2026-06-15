@@ -14,6 +14,7 @@ import '../../features/chat/document_preview_screen.dart';
 import '../../features/profile/profile_screen.dart';
 import '../../features/search/search_screen.dart';
 import '../../features/common/no_internet_screen.dart';
+import '../../core/models/chat_hive_model.dart';
 import '../../core/models/chat_model.dart';
 import '../../shared/providers/auth_provider.dart';
 
@@ -23,24 +24,24 @@ final routerProvider = StateNotifierProvider<GoRouterNotifier, GoRouter>((ref) {
 
 class GoRouterNotifier extends StateNotifier<GoRouter> {
   final Ref _ref;
-  
+
   GoRouterNotifier(this._ref) : super(_createRouter(_ref)) {
     _ref.listen(authProvider, (previous, next) {
       state.refresh();
     });
   }
-  
+
   static GoRouter _createRouter(Ref ref) {
     return GoRouter(
       initialLocation: '/splash',
       redirect: (context, state) {
         final authState = ref.read(authProvider);
-        
+
         // If auth is still loading, stay on splash
         if (authState.isLoading) {
           return state.fullPath == '/splash' ? null : '/splash';
         }
-        
+
         final isLoggedIn = authState.isAuthenticated;
         final isOnLogin = state.fullPath == '/login';
         final isOnSplash = state.fullPath == '/splash';
@@ -81,22 +82,24 @@ class GoRouterNotifier extends StateNotifier<GoRouter> {
             final type = state.uri.queryParameters['type'] ?? 'user';
             final name = state.uri.queryParameters['name'] ?? 'Chat';
             final message = state.uri.queryParameters['message'];
-            bool attendance_group =
-                state.uri.queryParameters['attendance_group'] == 'true';
+            final attendanceGroup = ChatHiveModel.parseAttendanceGroup(
+              state.uri.queryParameters['attendance_group'],
+            );
 
             return ChatScreen(
               chatId: chatId,
               chatType: type,
               chatName: name,
               initialMessage: message,
-              attendance_group: attendance_group,
+              attendance_group: attendanceGroup,
             );
           },
         ),
         GoRoute(
           path: '/chat-selectionold',
           builder: (context, state) {
-            debugPrint('Deep link received:_checkPendingDeepLink ${state.uri.queryParameters['message']}');
+            debugPrint(
+                'Deep link received:_checkPendingDeepLink ${state.uri.queryParameters['message']}');
             final message = state.uri.queryParameters['message'] ?? '';
             return ChatSelectionScreen(message: message);
           },
@@ -104,7 +107,8 @@ class GoRouterNotifier extends StateNotifier<GoRouter> {
         GoRoute(
           path: '/chat-selection',
           builder: (context, state) {
-            debugPrint('Deep link received:_checkPendingDeepLink ${state.uri.queryParameters['message']}');
+            debugPrint(
+                'Deep link received:_checkPendingDeepLink ${state.uri.queryParameters['message']}');
             final message = state.uri.queryParameters['message'] ?? '';
             return ChatDeepLinkingScreen(message: message);
           },
@@ -167,7 +171,8 @@ class GoRouterNotifier extends StateNotifier<GoRouter> {
           path: '/document/:url/:fileName',
           builder: (context, state) {
             final url = Uri.decodeComponent(state.pathParameters['url']!);
-            final fileName = Uri.decodeComponent(state.pathParameters['fileName']!);
+            final fileName =
+                Uri.decodeComponent(state.pathParameters['fileName']!);
             return DocumentPreviewScreen(
               documentUrl: url,
               fileName: fileName,

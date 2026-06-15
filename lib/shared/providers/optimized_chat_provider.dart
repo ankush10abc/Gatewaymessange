@@ -218,8 +218,18 @@ class OptimizedChatNotifier extends StateNotifier<OptimizedChatState> {
     debugPrint('➕ New chat created: ${chat.name}');
   }
 
-  Future<void> togglePin(String chatId, String chatType, bool isPinned) async {
-    await _repository.togglePinChat(chatId, chatType, isPinned);
+  Future<void> togglePin(
+    String chatId,
+    String chatType,
+    bool isPinned, {
+    bool attendanceGroup = false,
+  }) async {
+    await _repository.togglePinChat(
+      chatId,
+      chatType,
+      isPinned,
+      attendanceGroup: attendanceGroup,
+    );
   }
 
   Future<void> markAsRead(String chatId, String chatType, bool attendance_group) async {

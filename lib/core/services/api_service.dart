@@ -168,11 +168,25 @@ class ApiService {
     return (response.data as List).map((item) => ChatModel.fromJson(item)).toList();
   }
 
-  Future<List<User>> searchUsers(String query) async {
-    debugPrint('API Call: GET $baseUrl/users/search?query=$query');
-    final response = await _dio.get('/users/search', queryParameters: {'query': query});
+  Future<List<User>> searchUsers(String query, {int page = 1}) async {
+    debugPrint('API Call: GET $baseUrl/users/search?query=$query&page=$page');
+    final response = await _dio.get('/users/search', queryParameters: {
+      'query': query,
+      'page': page,
+    });
     debugPrint('API Response: GET $baseUrl/users/search - ${response.data}');
-    return (response.data as List).map((item) => User.fromJson(item)).toList();
+    
+    // Handle response structure: {data: [...]} or [...]
+    final List<dynamic> userList;
+    if (response.data is Map && response.data['data'] != null) {
+      userList = response.data['data'] as List;
+    } else if (response.data is List) {
+      userList = response.data as List;
+    } else {
+      return [];
+    }
+    
+    return userList.map((item) => User.fromJson(item)).toList();
   }
 
   Future<List<User>> getTeachers() async {

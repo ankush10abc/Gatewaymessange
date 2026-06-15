@@ -18,11 +18,15 @@ class SearchScreen extends ConsumerStatefulWidget {
 
 class _SearchScreenState extends ConsumerState<SearchScreen> {
   final TextEditingController _searchController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
   late final ApiService _apiService;
   final StorageService _storage = StorageService();
   List<User> _searchResults = [];
   bool _isLoading = false;
+  bool _isLoadingMore = false;
+  bool _hasMoreData = true;
   String _currentQuery = '';
+  int _currentPage = 1;
 
   @override
   void initState() {
@@ -30,6 +34,23 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
     final dio = Dio();
     _apiService = ApiService(dio);
     _initializeAuth();
+    _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  // Scroll listener for pagination
+  void _onScroll() {
+    if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent * 0.8) {
+      if (!_isLoadingMore && _hasMoreData && !_isLoading) {
+        _loadMoreUsers();
+      }
+    }
   }
 
   Future<void> _initializeAuth() async {
@@ -41,35 +62,72 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
   }
 
   Future<void> _searchUsers(String query) async {
+    // Reset pagination when new search
+    _currentPage = 1;
+    _hasMoreData = true;
+    
     setState(() {
       _isLoading = true;
       _currentQuery = query;
+      _searchResults = []; // Clear previous results
     });
 
     try {
-      final users = await _apiService.searchUsers(query);
+      final users = await _apiService.searchUsers(query, page: _currentPage);
       setState(() {
         _searchResults = users;
         _isLoading = false;
+        _hasMoreData = users.isNotEmpty && users.length >= 20;
       });
     } catch (e) {
       setState(() {
         _searchResults = [];
         _isLoading = false;
+        _hasMoreData = false;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Search failed: Due to user login in other device  $e', maxLines: 2,),
-          backgroundColor: Colors.red,
-        ),
-      );
+      debugPrint("Ankush catch $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Search failed: $e', maxLines: 2,),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     }
   }
 
-  @override
-  void dispose() {
-    _searchController.dispose();
-    super.dispose();
+  // Load more users for pagination
+  Future<void> _loadMoreUsers() async {
+    if (_isLoadingMore || !_hasMoreData) return;
+
+    setState(() {
+      _isLoadingMore = true;
+    });
+
+    try {
+      _currentPage++;
+      final moreUsers = await _apiService.searchUsers(_currentQuery, page: _currentPage);
+      
+      setState(() {
+        _searchResults.addAll(moreUsers);
+        _isLoadingMore = false;
+        _hasMoreData = moreUsers.length >= 20; // Assume 20 items per page
+      });
+    } catch (e) {
+      setState(() {
+        _isLoadingMore = false;
+        _currentPage--; // Revert page increment on error
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to load more: $e', maxLines: 2),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   @override
@@ -99,8 +157,18 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
               : _searchResults.isEmpty
                   ? _buildNoResults()
                   : ListView.builder(
-                      itemCount: _searchResults.length,
+                      controller: _scrollController,
+                      itemCount: _searchResults.length + (_isLoadingMore ? 1 : 0),
                       itemBuilder: (context, index) {
+                        if (index == _searchResults.length) {
+                          // Loading indicator at bottom
+                          return const Padding(
+                            padding: EdgeInsets.all(16.0),
+                            child: Center(
+                              child: CircularProgressIndicator(),
+                            ),
+                          );
+                        }
                         final user = _searchResults[index];
                         return _buildUserTile(user, currentUser);
                       },
