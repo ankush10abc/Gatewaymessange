@@ -1,5 +1,6 @@
 import 'package:intl/intl.dart';
-
+import 'package:fluttertoast/fluttertoast.dart';
+import 'package:flutter/material.dart';
 class AppDateUtils {
   static String formatDate(DateTime date, {String format = 'dd MMM yyyy'}) {
     return DateFormat(format).format(date);
@@ -8,7 +9,17 @@ class AppDateUtils {
   static String formatTime(DateTime date, {String format = 'hh:mm a'}) {
     return DateFormat(format).format(date);
   }
+  static void show(String message) {
+    Fluttertoast.showToast(
+      msg: message,
+      toastLength: Toast.LENGTH_SHORT,
+      gravity: ToastGravity.BOTTOM,
+      backgroundColor: Colors.black87,
+      textColor: Colors.white,
 
+      fontSize: 16,
+    );
+  }
   static String formatDateTime(DateTime date, {String format = 'dd MMM yyyy, hh:mm a'}) {
     return DateFormat(format).format(date);
   }

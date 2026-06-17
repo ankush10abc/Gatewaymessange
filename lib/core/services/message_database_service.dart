@@ -325,8 +325,15 @@ class MessageDatabaseService {
 
   // Convert Message to Map for database
   Map<String, dynamic> _messageToMap(Message message, String chatId, String chatType) {
+    // Primary key: firebaseId takes priority (set by syncOldMessagesToFirebaseAndDb)
+    // so that api_501 is the stable key, not the raw msgId
+    final primaryId = (message.firebaseId?.isNotEmpty == true)
+        ? message.firebaseId!
+        : (message.msgId?.isNotEmpty == true && message.msgId != '0')
+            ? message.msgId!
+            : message.id;
     return {
-      'id': message.firebaseId ?? message.msgId ?? message.id,
+      'id': primaryId,
       'chat_id': chatId,
       'chat_type': chatType,
       'sender_id': message.senderId,
@@ -340,10 +347,12 @@ class MessageDatabaseService {
       'status': jsonEncode(message.status),
       'is_read': (message.readAt != null && message.readAt!.isNotEmpty) ? 1 : 0,
       'reply_to_id': message.replyToId,
-      'reply_to_message_json': message.replyToMessage != null ? jsonEncode(message.replyToMessage!.toJson()) : null,
+      'reply_to_message_json': message.replyToMessage != null
+          ? jsonEncode(message.replyToMessage!.toJson())
+          : null,
       'firebase_id': message.firebaseId,
       'msg_id': message.msgId,
-      'profile_picture_url': message.profile_picture_url,
+      'profile_picture_url': message.profile_picture_url?.toString(),
       'metadata': message.metadata != null ? jsonEncode(message.metadata) : null,
       'created_at': message.timestamp.millisecondsSinceEpoch,
       'updated_at': DateTime.now().millisecondsSinceEpoch,

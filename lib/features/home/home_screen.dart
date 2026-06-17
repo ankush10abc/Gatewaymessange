@@ -187,10 +187,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
+
+
   @override
   void dispose() {
     _messageSyncService.stopChatListFirebaseSync();
     _searchController.dispose();
+    // TODO: implement dispose
     super.dispose();
   }
 
@@ -216,7 +219,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   // Implement search functionality
                 },
               )
-            : const Text('Gateway Messenger'),
+            :
+        const Text('Gateway Messenger'),
         actions: [
           if (!_isSearching)
             IconButton(

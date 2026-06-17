@@ -1,15 +1,17 @@
 import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:hive/hive.dart';
+
 import '../models/chat_hive_model.dart';
 import '../models/message_model.dart';
 import '../utils/chat_utils.dart';
 import '../utils/internet_checker.dart';
 import 'api_service_simple.dart';
 import 'firebase_realtime_service.dart';
+import 'firebase_sync_isolate_service.dart';
 import 'image_cache_service.dart';
 import 'message_database_service.dart';
-import 'firebase_sync_isolate_service.dart';
 
 /// HIGH-PERFORMANCE MESSAGE CACHING SERVICE WITH SQLITE
 ///
@@ -55,7 +57,8 @@ class MessageSyncService {
       {}; // Prevent concurrent recent Firebase syncs
   final ImageCacheService _imageCacheService = ImageCacheService();
   final MessageDatabaseService _dbService = MessageDatabaseService();
-  final FirebaseSyncIsolateService _syncIsolateService = FirebaseSyncIsolateService();
+  final FirebaseSyncIsolateService _syncIsolateService =
+      FirebaseSyncIsolateService();
   Box? _chatMetadataBox;
   Timer? _chatListBackgroundSyncTimer;
   String? _chatListBackgroundSyncSignature;
@@ -68,10 +71,16 @@ class MessageSyncService {
     final attendanceSuffix = (isAttendanceGroup == true) ? 'true' : '';
 
     if (chatType == 'group') {
-      return 'messages_group_${chatId}_$role$attendanceSuffix';
+      return 'group_$chatId$attendanceSuffix';
     } else {
       // For one-to-one: include both user IDs and role for uniqueness
-      return 'messages_user_${chatId}_${currentUserId ?? "unknown"}_$role$attendanceSuffix';
+      return 'private_${chatId}_${currentUserId ?? "unknown"}_$role$attendanceSuffix';
+      //  if (currentUserId != null && otherUserId != null) {
+      // final ids = [currentUserId, otherUserId]..sort();
+      // return 'private_${ids[0]}_${ids[1]}';
+      // }
+
+      return 'private_$chatId';
     }
   }
 
@@ -251,7 +260,8 @@ class MessageSyncService {
     // Cache profile picture (for all messages)
     final profilePictureUrl = _extractProfilePictureUrl(message);
     if (profilePictureUrl != null) {
-      final localProfilePath = await _imageCacheService.downloadAndCache(profilePictureUrl);
+      final localProfilePath =
+          await _imageCacheService.downloadAndCache(profilePictureUrl);
       if (localProfilePath != null && localProfilePath != profilePictureUrl) {
         metadata['local_profile_picture'] = localProfilePath;
         metadata['remote_profile_picture'] = profilePictureUrl;
@@ -301,15 +311,238 @@ class MessageSyncService {
         if (value is Map) {
           return MapEntry(key.toString(), _deepConvertMap(value));
         } else if (value is List) {
-          return MapEntry(key.toString(), value.map((item) {
-            if (item is Map) return _deepConvertMap(item);
-            return item;
-          }).toList());
+          return MapEntry(
+              key.toString(),
+              value.map((item) {
+                if (item is Map) return _deepConvertMap(item);
+                return item;
+              }).toList());
         }
         return MapEntry(key.toString(), value);
       });
     }
     return {};
+  }
+
+  //d
+  Future<void> addMessageToLocaldatabasefromApi(
+    String chatId,
+    String chatType,
+    List<Message> fallbackMessages,
+  ) async {
+    await _dbService.saveMessages(fallbackMessages, chatId, chatType);
+  }
+
+  /// Sync old messages from API to Firebase + SQLite with full deduplication.
+  /// Returns only the genuinely new (non-duplicate) messages that were inserted.
+  Future<List<Message>> syncOldMessagesToFirebaseAndDb({
+    required String chatId,
+    required String chatType,
+    required List<Message> messages,
+    String? currentUserId,
+    bool? isAttendanceGroup,
+  }) async {
+    if (messages.isEmpty) return [];
+
+    // Firebase path: attendance groups use 'group_1true', regular groups use 'group_1'
+    // This matches ChatUtils.generateChatId behavior
+    final firebaseChatId = ChatUtils.generateChatId(
+      chatId,
+      currentUserId: currentUserId,
+      otherUserId: '0',
+      chatType: chatType,
+      attendanceGroup: isAttendanceGroup,
+    );
+
+    debugPrint('$TAG 🔄 syncOldMessagesToFirebaseAndDb'
+        ' path=chats/$firebaseChatId/messages'
+        ' count=${messages.length} attendance=$isAttendanceGroup');
+
+    // --- Step 1: Read existing Firebase nodes to build dedup sets ---
+    // We read ALL fields per node so we can match by msgId stored inside
+    final existingFbKeys = <String>{};
+    final existingFbMsgIds = <String>{}; // values of msgId/id stored inside nodes
+    try {
+      final snap = await FirebaseRealtimeService.database
+          .ref('chats/$firebaseChatId/messages')
+          .get();
+      if (snap.exists && snap.value is Map) {
+        final raw = snap.value as Map<dynamic, dynamic>;
+        for (final entry in raw.entries) {
+          final nodeKey = entry.key.toString();
+          existingFbKeys.add(nodeKey);
+          // The key itself IS the msgId for old status-only nodes (e.g. "1","2"...)
+          existingFbMsgIds.add(nodeKey);
+          final val = entry.value;
+          if (val is Map) {
+            // Also collect any id values stored inside full message nodes
+            for (final f in ['msgId', 'msg_id', 'id', 'firebaseId']) {
+              final v = val[f]?.toString();
+              if (v != null && v.isNotEmpty && v != '0') existingFbMsgIds.add(v);
+            }
+          }
+        }
+      }
+      debugPrint('$TAG 📊 Firebase existing: ${existingFbKeys.length} nodes, '
+          'msgIds: ${existingFbMsgIds.length}');
+    } catch (e) {
+      debugPrint('$TAG ⚠️ Firebase read failed (will insert all): $e');
+    }
+
+    // --- Step 2: Read existing SQLite rows (id, firebase_id, msg_id only) ---
+    final existingDbIds = <String>{};
+    try {
+      final db = await _dbService.database;
+      final rows = await db.rawQuery(
+        'SELECT id, firebase_id, msg_id FROM messages WHERE chat_id=? AND chat_type=?',
+        [chatId, chatType],
+      );
+      for (final row in rows) {
+        for (final col in ['id', 'firebase_id', 'msg_id']) {
+          final v = row[col]?.toString();
+          if (v != null && v.isNotEmpty && v != '0' && v != 'null') {
+            existingDbIds.add(v);
+          }
+        }
+      }
+      debugPrint('$TAG 📊 SQLite existing ids: ${existingDbIds.length}');
+    } catch (e) {
+      debugPrint('$TAG ⚠️ SQLite read failed (will insert all): $e');
+    }
+
+    // --- Step 3: Classify messages ---
+    final firebaseUpdates = <String, dynamic>{};
+    final dbInserts = <Message>[];
+    final newMessages = <Message>[];
+
+    for (final msg in messages) {
+      // Resolve stable id: prefer msgId, fallback to id
+      final msgId = msg.msgId?.trim();
+      final resolvedId =
+          (msgId != null && msgId.isNotEmpty && msgId != '0') ? msgId : msg.id.trim();
+
+      if (resolvedId.isEmpty) {
+        debugPrint('$TAG ⚠️ Skip message with no id');
+        continue;
+      }
+
+      // Firebase key matches how backend already stores status-only nodes
+      // (numeric string = msgId). We use same key so we UPDATE the existing
+      // status-only node with full message data instead of creating a duplicate.
+      final fbKey = resolvedId; // e.g. "314" — same key backend uses
+
+      // Check if this key already has FULL message data (has text/senderId)
+      // If the node only has 'status', we should update it with full data
+      final nodeExists = existingFbKeys.contains(fbKey);
+      bool nodeHasFullData = false;
+      if (nodeExists) {
+        try {
+          final snap = await FirebaseRealtimeService.database
+              .ref('chats/$firebaseChatId/messages/$fbKey')
+              .get();
+          if (snap.exists && snap.value is Map) {
+            final nodeMap = snap.value as Map;
+            // Node has full data if it has senderId or text
+            nodeHasFullData = nodeMap.containsKey('senderId') ||
+                nodeMap.containsKey('sender_id') ||
+                nodeMap.containsKey('text') ||
+                nodeMap.containsKey('content');
+          }
+        } catch (_) {}
+      }
+
+      // Insert to Firebase if: node doesn't exist OR exists but only has status
+      if (!nodeExists || !nodeHasFullData) {
+        final data = _buildFirebasePayload(msg, fbKey, chatId, resolvedId);
+        firebaseUpdates[fbKey] = data;
+        debugPrint('$TAG ➕ Firebase ${nodeExists ? "UPDATE status-only" : "INSERT"}: $fbKey');
+      } else {
+        debugPrint('$TAG ⏭️ Firebase skip (full data exists): $fbKey');
+      }
+
+      // SQLite dedup: skip if resolvedId or api_resolvedId already exists
+      final dbDup = existingDbIds.contains(resolvedId) ||
+          existingDbIds.contains('api_$resolvedId') ||
+          (msg.firebaseId != null &&
+              msg.firebaseId!.isNotEmpty &&
+              existingDbIds.contains(msg.firebaseId!));
+
+      if (!dbDup) {
+        // Store with firebaseId = resolvedId (numeric msgId) so it matches
+        // the Firebase node key for future lookups
+        final enriched = msg.copyWith(firebaseId: fbKey);
+        dbInserts.add(enriched);
+        newMessages.add(enriched);
+        debugPrint('$TAG ➕ SQLite INSERT: $resolvedId');
+      } else {
+        debugPrint('$TAG ⏭️ SQLite skip duplicate: $resolvedId');
+      }
+    }
+
+    debugPrint('$TAG 📋 Plan: firebase=${firebaseUpdates.length} writes, '
+        'sqlite=${dbInserts.length} inserts, '
+        'total=${messages.length}');
+
+    // --- Step 4: Write to Firebase ---
+    if (firebaseUpdates.isNotEmpty) {
+      try {
+        await FirebaseRealtimeService.database
+            .ref('chats/$firebaseChatId/messages')
+            .update(firebaseUpdates);
+        debugPrint(
+            '$TAG ✅ Firebase wrote ${firebaseUpdates.length} messages to '
+            'chats/$firebaseChatId/messages');
+      } catch (e) {
+        debugPrint('$TAG ❌ Firebase write error: $e');
+      }
+    }
+
+    // --- Step 5: Write to SQLite + Hive ---
+    if (dbInserts.isNotEmpty) {
+      try {
+        await _dbService.saveMessages(dbInserts, chatId, chatType);
+        debugPrint('$TAG ✅ SQLite inserted ${dbInserts.length} messages');
+
+        final cacheKey = _getCacheKey(chatId, chatType,
+            isAttendanceGroup: isAttendanceGroup);
+        await _cacheMessages(cacheKey, dbInserts, append: true);
+      } catch (e) {
+        debugPrint('$TAG ❌ SQLite write error: $e');
+      }
+    }
+
+    return newMessages;
+  }
+
+  /// Build a Firebase-safe payload — no nulls, timestamps as int.
+  Map<String, dynamic> _buildFirebasePayload(
+      Message msg, String fbKey, String chatId, String resolvedId) {
+    final data = <String, dynamic>{
+      'id': fbKey,
+      'firebaseId': fbKey,
+      'chatId': chatId,
+      'msgId': resolvedId,
+      'senderId': msg.senderId,
+      'sender_id': msg.senderId,
+      'senderName': msg.senderName ?? '',
+      'sender_name': msg.senderName ?? '',
+      'text': msg.text,
+      'content': msg.text,
+      'message': msg.text,
+      'type': msg.type,
+      'timestamp': msg.timestamp.millisecondsSinceEpoch,
+      // Preserve existing status if any — merge with sent default
+      'status': msg.status.isNotEmpty ? msg.status : {'default': 'sent'},
+    };
+    if (msg.fileUrl?.isNotEmpty == true) data['file_url'] = msg.fileUrl!;
+    if (msg.file_path?.isNotEmpty == true) data['file_path'] = msg.file_path!;
+    if (msg.fileName?.isNotEmpty == true) data['file_name'] = msg.fileName!;
+    if (msg.fileSize != null && msg.fileSize! > 0) data['file_size'] = msg.fileSize!;
+    if (msg.replyToId?.isNotEmpty == true) data['reply_to_id'] = msg.replyToId!;
+    if (msg.profile_picture_url != null) {
+      data['profile_picture_url'] = msg.profile_picture_url.toString();
+    }
+    return data;
   }
 
   /// STEP 1: Get cached messages instantly from SQLite (0ms delay)
@@ -321,7 +554,8 @@ class MessageSyncService {
     try {
       // PRIORITY 1: Load from SQLite (fastest)
       try {
-        final dbMessages = await _dbService.getMessages(chatId, chatType, limit: 50);
+        final dbMessages =
+            await _dbService.getMessages(chatId, chatType, limit: 500);
         if (dbMessages.isNotEmpty) {
           // debugPrint('$TAG ✅ Loaded ${dbMessages.length} messages from SQLite (instant)');
           return dbMessages;
@@ -375,7 +609,8 @@ class MessageSyncService {
       if (messages.isNotEmpty) {
         try {
           unawaited(_dbService.saveMessages(messages, chatId, chatType));
-          debugPrint('$TAG 🔄 Migrating ${messages.length} Hive messages to SQLite');
+          debugPrint(
+              '$TAG 🔄 Migrating ${messages.length} Hive messages to SQLite');
         } catch (e) {
           debugPrint('$TAG ⚠️ SQLite migration skipped: $e');
         }
@@ -413,7 +648,8 @@ class MessageSyncService {
       final statusKey = '${cacheKey}_api_loaded';
       final isLoaded = statusBox.get(statusKey, defaultValue: false);
       if (isLoaded == true) {
-        debugPrint('$TAG$TAG $TAG ⏭️ API already loaded for $cacheKey (persistent), skipping API call');
+        debugPrint(
+            '$TAG$TAG $TAG ⏭️ API already loaded for $cacheKey (persistent), skipping API call');
         final cachedMessages = await getCachedMessages(chatId, chatType,
             currentUserId: currentUserId,
             userRole: userRole,
@@ -428,7 +664,8 @@ class MessageSyncService {
     }
 
     try {
-      debugPrint('$TAG$TAG $TAG 🌐 Loading messages from API for $cacheKey (first time)');
+      debugPrint(
+          '$TAG$TAG $TAG 🌐 Loading messages from API for $cacheKey (first time)');
       final id = int.parse(chatId);
 
       Map<String, dynamic> result;
@@ -574,6 +811,7 @@ class MessageSyncService {
     String? otherUserId,
     bool? isAttendanceGroup,
   }) async {
+    debugPrint("Ankush data update to firebase firebaseChatId ");
     if (messages.isEmpty) return;
 
     try {
@@ -617,7 +855,7 @@ class MessageSyncService {
       debugPrint(
           '🔥 API → Firebase synced ${messages.length} messages for $firebaseChatId');
     } catch (e) {
-      debugPrint('$TAG$TAG ❌ API → Firebase message sync failed: $e');
+      debugPrint('$TAG ❌ API → Firebase message sync failed: $e');
     }
   }
 
@@ -631,7 +869,7 @@ class MessageSyncService {
     bool append = false,
   }) async {
     final id = int.parse(chatId);
-    final response = await apiService.getGroupMessages(id, page, limit);
+    final response = await apiService.getGroupMessages(id, page, 15);
     final userData = Map<String, dynamic>.from(response.user);
     userData['attendance_group'] = true;
 
@@ -642,6 +880,7 @@ class MessageSyncService {
       isAttendanceGroup: true,
     );
 
+    // Save to Hive cache
     await saveMessagesToCache(
       chatId: chatId,
       chatType: 'group',
@@ -652,22 +891,14 @@ class MessageSyncService {
       append: append,
     );
 
-    await _syncMessagesToFirebase(
-      chatId: chatId,
-      chatType: 'group',
-      messages: response.data,
-      currentUserId: currentUserId,
-      otherUserId: '0',
-      isAttendanceGroup: true,
-    );
+    // Save to SQLite with dedup (no Firebase sync here — caller handles it)
+    if (response.data.isNotEmpty) {
+      await _dbService.saveMessages(response.data, chatId, 'group');
+      debugPrint(
+          '$TAG 💾 syncAttendanceGroupFromApi: saved ${response.data.length} to SQLite page=$page');
+    }
 
-    return getCachedMessages(
-      chatId,
-      'group',
-      currentUserId: currentUserId,
-      userRole: userRole,
-      isAttendanceGroup: true,
-    );
+    return response.data;
   }
 
   String? _resolveFirebaseOtherUserId(
@@ -706,7 +937,8 @@ class MessageSyncService {
     );
     debugPrint('$TAG ⏭️ cachedMessages $cacheKey');
     if (_isSyncingFirebaseRecent[cacheKey] == true) {
-      debugPrint('$TAG$TAG ⏭️ Recent Firebase sync already running for $cacheKey');
+      debugPrint(
+          '$TAG$TAG ⏭️ Recent Firebase sync already running for $cacheKey');
       return [];
     }
 
@@ -830,7 +1062,8 @@ class MessageSyncService {
     try {
       final hasInternet = await InternetChecker.hasInternet();
       if (!hasInternet) {
-        debugPrint('$TAG$TAG 📴 Skipping chat-list Firebase cache sync while offline');
+        debugPrint(
+            '$TAG$TAG 📴 Skipping chat-list Firebase cache sync while offline');
         return;
       }
 
@@ -906,8 +1139,8 @@ class MessageSyncService {
   }
 
   /// Cache Firebase messages to SQLite in background (non-blocking async)
-  Future<void> _cacheMessagesRealtimeBackground(
-      String cacheKey, List<Message> messages, String chatId, String chatType) async {
+  Future<void> _cacheMessagesRealtimeBackground(String cacheKey,
+      List<Message> messages, String chatId, String chatType) async {
     try {
       // Save to SQLite in background (non-blocking async)
       unawaited(_saveToDatabaseAsync(
@@ -915,13 +1148,14 @@ class MessageSyncService {
         chatId: chatId,
         chatType: chatType,
       ));
-      
+
       // Also update Hive cache for backward compatibility
       final box = await _getMessageBox(cacheKey);
       for (final message in messages) {
         await _putMessage(box, message);
       }
-      debugPrint('$TAG$TAG 🔄 Background cached ${messages.length} Firebase messages');
+      debugPrint(
+          '$TAG$TAG 🔄 Background cached ${messages.length} Firebase messages');
     } catch (e) {
       debugPrint('$TAG$TAG ❌ Realtime cache error: $e');
     }
@@ -935,14 +1169,14 @@ class MessageSyncService {
       bool? isAttendanceGroup}) async {
     try {
       final cacheMessage = await _withCachedImage(message);
-      
+
       // Try to save to SQLite (priority)
       try {
         await _dbService.saveMessage(cacheMessage, chatId, chatType);
       } catch (e) {
         debugPrint('$TAG$TAG ⚠️ SQLite save skipped: $e');
       }
-      
+
       // Save to Hive (backward compatibility - always works)
       final cacheKey = _getCacheKey(chatId, chatType,
           currentUserId: currentUserId,
@@ -951,7 +1185,7 @@ class MessageSyncService {
       final box = await _getMessageBox(cacheKey);
       final key = _getMessageStorageKey(cacheMessage);
       await box.put(key, cacheMessage.toJson());
-      
+
       debugPrint('$TAG$TAG 📝 Added message $key to cache');
     } catch (e) {
       debugPrint('$TAG$TAG ❌ Failed to cache message: $e');
@@ -1075,7 +1309,8 @@ class MessageSyncService {
 
     // Prevent concurrent Firebase older syncs
     if (_isSyncingFirebaseOlder[cacheKey] == true) {
-      debugPrint('$TAG ⏭️ Firebase older sync already in progress for $cacheKey');
+      debugPrint(
+          '$TAG ⏭️ Firebase older sync already in progress for $cacheKey');
       return;
     }
 
@@ -1089,7 +1324,8 @@ class MessageSyncService {
           isAttendanceGroup: isAttendanceGroup);
 
       if (cachedMessages.isEmpty) {
-        debugPrint('$TAG ⏭️ No cached messages for $cacheKey, skipping older sync');
+        debugPrint(
+            '$TAG ⏭️ No cached messages for $cacheKey, skipping older sync');
         _isSyncingFirebaseOlder[cacheKey] = false;
         return;
       }
@@ -1248,7 +1484,8 @@ class MessageSyncService {
 
       if (newKey.isNotEmpty) {
         await box.put(newKey, newMessage.toJson());
-        debugPrint('$TAG 🔁 Replaced cached message $oldMessageKey with $newKey');
+        debugPrint(
+            '$TAG 🔁 Replaced cached message $oldMessageKey with $newKey');
       }
     } catch (e) {
       debugPrint('$TAG ❌ Failed to replace cached message: $e');
@@ -1325,12 +1562,12 @@ class MessageSyncService {
           isAttendanceGroup: isAttendanceGroup);
       final box = await _getMessageBox(cacheKey);
       await box.clear();
-      
+
       // Clear persistent API loaded flag
       final statusBox = await Hive.openBox('chat_status');
       final statusKey = '${cacheKey}_api_loaded';
       await statusBox.delete(statusKey);
-      
+
       debugPrint('$TAG 🗑️ Cleared cache for $cacheKey');
     } catch (e) {
       debugPrint('$TAG ❌ Failed to clear cache: $e');
@@ -1348,7 +1585,7 @@ class MessageSyncService {
           userRole: userRole,
           isAttendanceGroup: isAttendanceGroup);
       final box = await _getMessageBox(cacheKey);
-      
+
       // Get persistent API loaded flag
       final statusBox = await Hive.openBox('chat_status');
       final statusKey = '${cacheKey}_api_loaded';
@@ -1376,10 +1613,10 @@ class MessageSyncService {
         isAttendanceGroup: isAttendanceGroup);
     _firebaseListeners[cacheKey]?.cancel();
     _firebaseListeners.remove(cacheKey);
-    
+
     // Stop background isolate sync
     _syncIsolateService.stopSync(chatId, chatType, isAttendanceGroup);
-    
+
     debugPrint('$TAG 🛑 Cancelled Firebase listener for $cacheKey');
   }
 
@@ -1402,10 +1639,10 @@ class MessageSyncService {
     _isSyncingFirebaseRecent.clear();
     _apiLoadedFlags.clear();
     stopChatListFirebaseSync();
-    
+
     // Stop all background isolate syncs
     _syncIsolateService.stopAllSyncs();
-    
+
     debugPrint('$TAG 🛑 MessageSyncService disposed');
   }
 

@@ -3,6 +3,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../app/app.dart';
 import '../../core/models/user_model.dart';
 import '../../core/services/api_service_simple.dart';
 import '../../core/services/firebase_service.dart';
@@ -192,7 +193,33 @@ class AuthNotifier extends StateNotifier<AuthState> {
       debugPrint('Login error in auth provider: $e');
       
       String errorMessage = 'Login failed';
-      
+
+      // ScaffoldMessenger.of(navigatorKey.currentContext!).showSnackBar(
+      //   SnackBar(
+      //     content: Row(
+      //       children: [
+      //         const Icon(Icons.close, color: Colors.white),
+      //         const SizedBox(width: 12),
+      //         const Text(
+      //           'The provided credentials are incorrect',
+      //           style: TextStyle(
+      //             color: Colors.white,
+      //             fontSize: 15,
+      //             fontWeight: FontWeight.w500,
+      //           ),
+      //         ),
+      //       ],
+      //     ),
+      //     backgroundColor: Colors.green[700],
+      //     behavior: SnackBarBehavior.floating,
+      //     margin: const EdgeInsets.all(16),
+      //     duration: const Duration(seconds: 2),
+      //     shape: RoundedRectangleBorder(
+      //       borderRadius: BorderRadius.circular(12),
+      //     ),
+      //     elevation: 6,
+      //   ),
+      // );
       // Handle Exception thrown from API service
       if (e is Exception) {
         final exceptionMsg = e.toString();

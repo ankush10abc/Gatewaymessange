@@ -1,9 +1,11 @@
+import 'package:check_setting/core/utils/date_utils.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
+import '../../app/app.dart';
 import '../../app/theme/app_theme.dart';
 import '../../shared/providers/auth_provider.dart';
 import '../../core/utils/internet_checker.dart';
@@ -20,6 +22,7 @@ class LoginScreen extends ConsumerStatefulWidget {
 
 class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
+  final _scaffoldKey = GlobalKey<ScaffoldMessengerState>();
   final _mobileController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _isPasswordVisible = false;
@@ -115,8 +118,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             _mobileController.text.trim(),
             _passwordController.text,
           );
-      if (success && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+      if (success ) {
+        _scaffoldKey.currentState?.showSnackBar(
           SnackBar(
             content: Row(
               children: [
@@ -142,16 +145,19 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             elevation: 6,
           ),
         );
-        context.go('/home');
-      }else if(!success){
-        ScaffoldMessenger.of(context).showSnackBar(
+        if (mounted) {
+          context.go('/home');
+        }
+      }else if(!success ){
+        AppDateUtils.show('The provided credentials are incorrect');
+        ScaffoldMessenger.of(navigatorKey.currentContext!).showSnackBar(
           SnackBar(
             content: Row(
               children: [
-                const Icon(Icons.check_circle_outline, color: Colors.white),
+                const Icon(Icons.close, color: Colors.white),
                 const SizedBox(width: 12),
                 const Text(
-                  'The provided credentials are incorrect ',
+                  'The provided credentials are incorrect',
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: 15,
@@ -184,7 +190,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
         setState(() {
           _errorMessage = next.error;
         });
-        
+
         // Show error in SnackBar instead of Toast
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -214,19 +220,21 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             elevation: 6,
           ),
         );
-        
+
         Future.delayed(const Duration(milliseconds: 100), () {
           ref.read(authProvider.notifier).clearError();
         });
       }
     });
 
-    return Scaffold(
-      backgroundColor: AppTheme.whatsAppGreen,
-      resizeToAvoidBottomInset: true,
-      body: SafeArea(
-        child: Column(
-          children: [
+    return ScaffoldMessenger(
+      key: _scaffoldKey,
+      child: Scaffold(
+        backgroundColor: AppTheme.whatsAppGreen,
+        resizeToAvoidBottomInset: true,
+        body: SafeArea(
+          child: Column(
+            children: [
             // Top Section with Logo
             Expanded(
               flex: 2,
@@ -493,6 +501,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
             ),
           ],
         ),
+      ),
       ),
     );
   }

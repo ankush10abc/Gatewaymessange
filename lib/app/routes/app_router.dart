@@ -83,7 +83,7 @@ class GoRouterNotifier extends StateNotifier<GoRouter> {
             final name = state.uri.queryParameters['name'] ?? 'Chat';
             final message = state.uri.queryParameters['message'];
             final attendanceGroup = ChatHiveModel.parseAttendanceGroup(
-              state.uri.queryParameters['attendance_group'],
+              state.uri.queryParameters['attendance_group'] ?? 'false',
             );
 
             return ChatScreen(

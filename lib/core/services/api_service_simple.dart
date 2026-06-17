@@ -686,7 +686,7 @@ class ApiService {
       queryParameters: {'page': page, 'limit': limit},
     );
     debugPrint(
-        'API Response: GET $baseUrl/api/messages/group/$groupId - ${response.data}');
+        'API Response: GET $baseUrl/api/messages/group/$groupId?page=$page&limit=$limit - ${response.data}');
 
     final data = response.data as Map<String, dynamic>;
     final messages = _messagesFromResponse(data['messages']);

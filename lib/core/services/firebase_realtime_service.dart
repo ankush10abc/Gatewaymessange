@@ -530,7 +530,7 @@ class FirebaseRealtimeService {
               if (statusSnapshot.exists) {
                 final statusMap = _snapshotMap(statusSnapshot.value);
                 if (statusMap == null || statusMap.isEmpty) continue;
-                debugPrint("$TAG Data Error catch $statusMap key ");
+                // debugPrint("$TAG Data Error catch $statusMap key ");
                 bool allRead = true;
 
                 try {

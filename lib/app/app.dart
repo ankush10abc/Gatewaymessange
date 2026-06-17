@@ -46,6 +46,8 @@ class _GatewayMessengerAppState extends ConsumerState<GatewayMessengerApp> {
             ),
           ),
           error: (error, stack) => MaterialApp(
+
+            navigatorKey: navigatorKey,
             home: Scaffold(
               body: Center(
                 child: Text('Error: $error'),

@@ -358,61 +358,107 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   int pageCount = 1;
 
   Future<void> _syncOldMessages() async {
-    debugPrint("_syncOldMessages$_isLoadingOldMessages");
     if (_isLoadingOldMessages) return;
-
-    setState(() {
-      _isLoadingOldMessages = true;
-    });
+    setState(() => _isLoadingOldMessages = true);
 
     try {
       final nextPage = pageCount + 1;
 
-      final syncedMessages = _isAttendanceGroup == true
-          ? await _syncService.syncAttendanceGroupFromApi(
-              chatId: widget.chatId,
-              apiService: _apiService,
-              currentUserId: _currentUserId,
-              userRole: _userRoleCache,
-              page: nextPage,
-              limit: ApiService.messageCount,
-              append: true,
-            )
-          : await _syncService.loadMoreMessages(
-              chatId: widget.chatId,
-              chatType: widget.chatType,
-              apiService: _apiService,
-              currentUserId: _currentUserId,
-              userRole: _userRoleCache,
-              isAttendanceGroup: _isAttendanceGroup,
-              page: nextPage,
-              limit: ApiService.messageCount,
-            );
+      if (_isAttendanceGroup == true) {
+        // Fetch from API
+        final id = int.parse(widget.chatId);
+        final response = await _apiService.getGroupMessages(
+            id, nextPage, ApiService.messageCount);
+        final apiMessages = response.data;
 
-      if (mounted) {
-        setState(() {
-          debugPrint("AnkushuserRole syncedMessages $syncedMessages");
-          if (_isAttendanceGroup == true) {
-            _messages.insertAll(0, syncedMessages);
-          } else {
-            _messages.insertAll(0, syncedMessages);
-          }
-          _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-          pageCount = nextPage;
-          _isLoadingOldMessages = false;
-        });
-        debugPrint(
-            '✅ Loaded page $nextPage with ${syncedMessages.length} messages');
+        // Sync to Firebase + SQLite with full deduplication.
+        // Returns only genuinely new (non-duplicate) messages.
+        final newMessages = apiMessages.isNotEmpty
+            ? await _syncService.syncOldMessagesToFirebaseAndDb(
+                chatId: widget.chatId,
+                chatType: widget.chatType,
+                messages: apiMessages,
+                currentUserId: _currentUserId,
+                isAttendanceGroup: true,
+              )
+            : <Message>[];
+
+        if (mounted) {
+          setState(() {
+            if (newMessages.isNotEmpty) {
+              // Build a full dedup set from current UI messages
+              final existingIds = <String>{
+                for (final m in _messages) ...[
+                  if ((m.firebaseId ?? '').isNotEmpty) m.firebaseId!,
+                  if ((m.msgId ?? '').isNotEmpty && m.msgId != '0') m.msgId!,
+                  if (m.id.isNotEmpty && m.id != '0') m.id,
+                ],
+              };
+              // Only append messages not already in UI
+              final deduped = newMessages.where((m) {
+                final fbId = m.firebaseId ?? '';
+                final mId = m.msgId ?? '';
+                return !existingIds.contains(fbId) &&
+                    !(mId.isNotEmpty && mId != '0' && existingIds.contains(mId)) &&
+                    !existingIds.contains(m.id);
+              }).toList();
+              _messages.addAll(deduped);
+              _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+            }
+            pageCount = nextPage;
+            _isLoadingOldMessages = false;
+          });
+          debugPrint(
+              '✅ _syncOldMessages(attendance) page=$nextPage '
+              'api=${apiMessages.length} newToUI=${newMessages.length}');
+        }
+      } else {
+        // Non-attendance: load from Firebase/cache via existing flow
+        final apiMessages = await _syncService.loadMoreMessages(
+          chatId: widget.chatId,
+          chatType: widget.chatType,
+          apiService: _apiService,
+          currentUserId: _currentUserId,
+          userRole: _userRoleCache,
+          isAttendanceGroup: _isAttendanceGroup,
+          page: nextPage,
+          limit: ApiService.messageCount,
+        );
+
+        if (apiMessages.isNotEmpty) {
+          unawaited(_syncService.addMessageToLocaldatabasefromApi(
+            widget.chatId,
+            widget.chatType,
+            apiMessages,
+          ));
+        }
+
+        if (mounted) {
+          setState(() {
+            final existingIds = <String>{
+              for (final m in _messages) ...[
+                if ((m.firebaseId ?? '').isNotEmpty) m.firebaseId!,
+                if ((m.msgId ?? '').isNotEmpty) m.msgId!,
+                if (m.id.isNotEmpty) m.id,
+              ],
+            };
+            final deduped = apiMessages.where((m) =>
+                !existingIds.contains(m.firebaseId ?? '') &&
+                !existingIds.contains(m.msgId ?? '') &&
+                !existingIds.contains(m.id)).toList();
+            _messages.addAll(deduped);
+            _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+            pageCount = nextPage;
+            _isLoadingOldMessages = false;
+          });
+          debugPrint('✅ _syncOldMessages page=$nextPage loaded=${apiMessages.length}');
+        }
       }
     } catch (e) {
       if (mounted) {
-        setState(() {
-          _isLoadingOldMessages = false;
-        });
+        setState(() => _isLoadingOldMessages = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text(
-                  'Failed to load old messages: Check Internet Connection ')),
+          const SnackBar(content: Text('Failed to load old messages: Check Internet Connection')),
         );
       }
     }
@@ -617,12 +663,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     }
 
     try {
-      final cachedMessages = await _syncService.syncAttendanceGroupFromApi(
+      final freshMessages = await _syncService.syncAttendanceGroupFromApi(
         chatId: widget.chatId,
         apiService: _apiService,
         currentUserId: _currentUserId,
         userRole: _userRoleCache,
-        page: 1,
+        page: pageCount,
         limit: ApiService.messageCount,
         append: append,
       );
@@ -636,22 +682,35 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       if (!mounted) return;
 
       setState(() {
-        if (cachedMetadata != null) {
-          _user = cachedMetadata;
-        }
+        if (cachedMetadata != null) _user = cachedMetadata;
         _isAttendanceGroup = true;
-        _messages = cachedMessages;
+
+        if (freshMessages.isNotEmpty) {
+          // Merge without duplicates instead of blindly inserting
+          final existingIds = <String>{
+            for (final m in _messages) ...[
+              if ((m.firebaseId ?? '').isNotEmpty) m.firebaseId!,
+              if ((m.msgId ?? '').isNotEmpty && m.msgId != '0') m.msgId!,
+              if (m.id.isNotEmpty && m.id != '0') m.id,
+            ],
+          };
+          final deduped = freshMessages.where((m) {
+            final fbId = m.firebaseId ?? '';
+            final mId = m.msgId ?? '';
+            return !existingIds.contains(fbId) &&
+                !(mId.isNotEmpty && mId != '0' && existingIds.contains(mId)) &&
+                !existingIds.contains(m.id);
+          }).toList();
+          _messages.addAll(deduped);
+          _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+        }
         _isLoadingPermissions = false;
       });
 
       _setupCacheWatcher();
     } catch (e) {
       debugPrint('❌ Attendance group API sync failed: $e');
-      if (mounted) {
-        setState(() {
-          _isLoadingPermissions = false;
-        });
-      }
+      if (mounted) setState(() => _isLoadingPermissions = false);
     }
   }
 
@@ -2790,6 +2849,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       padding: const EdgeInsets.only(bottom: 4),
       child: Text(
         message.senderName ?? 'Unknown',
+        // "${message.senderName}${message.id}" ?? 'Unknown',
         style: TextStyle(
           fontSize: 12,
           fontWeight: FontWeight.bold,
@@ -3628,7 +3688,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     if (difference.inDays == 0) {
       return '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}';
     } else if (difference.inDays == 1) {
-      return 'Yesterday';
+      return 'Yesterday ${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}';
     } else {
       return '${timestamp.day}/${timestamp.month}/${timestamp.year} ${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}';
     }
