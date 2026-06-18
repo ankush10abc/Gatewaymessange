@@ -130,6 +130,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
       _initializeChat();
       _handleInitialMessage();
+      try {
+        _refreshAfterAttendance();
+      } catch (e) {
+        print(e);
+      }
     });
   }
 
@@ -356,6 +361,69 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   }
 
   int pageCount = 1;
+
+  /// Called after attendance is marked — resets page, clears stale cache,
+  /// fetches page 1 from API, syncs to Firebase + SQLite, updates UI.
+  Future<void> _refreshAfterAttendance() async {
+    if (!mounted) return;
+    final hasInternet = await InternetChecker.hasInternet();
+    if (!hasInternet) return;
+
+    // Reset pagination so next "sync old" starts from page 2
+    pageCount = 1;
+
+    try {
+      final id = int.parse(widget.chatId);
+      // Fetch fresh page 1 from API
+      final response =
+          await _apiService.getGroupMessages(id, 1, ApiService.messageCount);
+      final freshMessages = response.data;
+
+      if (freshMessages.isEmpty) return;
+
+      // Sync to Firebase + SQLite (handles dedup internally)
+      final synced = await _syncService.syncOldMessagesToFirebaseAndDb(
+        chatId: widget.chatId,
+        chatType: widget.chatType,
+        messages: freshMessages,
+        currentUserId: _currentUserId,
+        isAttendanceGroup: true,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        // Merge all fresh messages into UI with dedup
+        final existingIds = <String>{
+          for (final m in _messages) ...[
+            if ((m.firebaseId ?? '').isNotEmpty) m.firebaseId!,
+            if ((m.msgId ?? '').isNotEmpty && m.msgId != '0') m.msgId!,
+            if (m.id.isNotEmpty && m.id != '0') m.id,
+          ],
+        };
+        final newToUI = freshMessages.where((m) {
+          final fbId = m.firebaseId ?? '';
+          final mId = m.msgId ?? '';
+          return !existingIds.contains(fbId) &&
+              !(mId.isNotEmpty && mId != '0' && existingIds.contains(mId)) &&
+              !existingIds.contains(m.id);
+        }).toList();
+
+        if (newToUI.isNotEmpty) {
+          _messages.addAll(newToUI);
+        } else {
+          // Replace with fresh list to reflect any status/text changes
+          _messages = freshMessages;
+        }
+        _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+      });
+
+      debugPrint(
+          '✅ _refreshAfterAttendance: api=${freshMessages.length} synced=${synced.length}');
+    } catch (e) {
+      debugPrint('❌ _refreshAfterAttendance error: $e');
+    }
+  }
 
   Future<void> _syncOldMessages() async {
     if (_isLoadingOldMessages) return;
@@ -826,7 +894,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           final filteredMessages = realtimeMessages.where((msg) {
             // Always keep messages from other users
             if (msg.senderId != _currentUserId) return true;
-            
+
             // For own messages: Skip if already exists in UI
             // Check by firebase ID or by timestamp (within 5 seconds)
             final firebaseId = msg.firebaseId ?? msg.id;
@@ -834,22 +902,22 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
               // Match by firebase ID
               final existingFirebaseId = existing.firebaseId ?? existing.id;
               if (firebaseId == existingFirebaseId) return true;
-              
+
               // Match by timestamp + sender (for messages sent in last 10 seconds)
               if (existing.senderId == msg.senderId &&
                   existing.text == msg.text &&
                   existing.timestamp.difference(msg.timestamp).abs().inSeconds < 10) {
                 return true;
               }
-              
+
               return false;
             });
-            
+
             if (isDuplicate) {
               debugPrint('⏭️ Skipping duplicate message from Firebase: $firebaseId');
               return false;
             }
-            
+
             return true;
           }).toList();
 
@@ -980,7 +1048,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   List<Message> _mergeMessages(
       List<Message> apiMessages, List<Message> realtimeMessages) {
     // debugPrint('🔀 [MERGE] Starting merge: ${apiMessages.length} existing + ${realtimeMessages.length} new');
-    
+
     final messageMap = <String, Message>{};
     final firebaseIdToItem = <String, Message>{};
 
@@ -1413,7 +1481,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
     try {
       final sentMessage = await _sendToAPI(message);
-      
+
       // Replace temp message with real message in cache
       await _syncService.replaceMessageInCache(
         widget.chatId,
@@ -1430,12 +1498,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         setState(() {
           debugPrint('🟡 [SEND] Step 2: Before merge. Messages count: ${_messages.length}');
           debugPrint('🟡 [SEND] Temp ID: $tempId, Real ID: ${sentMessage.id}, Firebase ID: ${sentMessage.firebaseId}');
-          
+
           _messages = _mergeMessages(
             _messages.where((item) => item.id != tempId).toList(),
             [sentMessage],
           );
-          
+
           debugPrint('🟢 [SEND] Step 2: After merge. Messages count: ${_messages.length}');
         });
       }
@@ -2572,7 +2640,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                                   content:
                                       Text('Attendance marked successfully')),
                             );
-                            initUI();
+                            // Reset page and refresh attendance data
+                            await _refreshAfterAttendance();
                           }
                         },
                         icon: const Icon(Icons.check_circle),
@@ -3680,19 +3749,36 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       return 'typing...';
     }
   }
+String _formatTime(DateTime timestamp) {
+  final now = DateTime.now();
+  final difference = now.difference(timestamp);
 
-  String _formatTime(DateTime timestamp) {
-    final now = DateTime.now();
-    final difference = now.difference(timestamp);
+  final hour = timestamp.hour % 12 == 0 ? 12 : timestamp.hour % 12;
+  final minute = timestamp.minute.toString().padLeft(2, '0');
+  final period = timestamp.hour >= 12 ? 'PM' : 'AM';
+  final time = '$hour:$minute $period';
 
-    if (difference.inDays == 0) {
-      return '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}';
-    } else if (difference.inDays == 1) {
-      return 'Yesterday ${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}';
-    } else {
-      return '${timestamp.day}/${timestamp.month}/${timestamp.year} ${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}';
-    }
+  if (difference.inDays == 0) {
+    return time;
+  } else if (difference.inDays == 1) {
+    return 'Yesterday $time';
+  } else {
+    return '${timestamp.day}/${timestamp.month}/${timestamp.year} $time';
   }
+}
+
+  // String _formatTime(DateTime timestamp) {
+  //   final now = DateTime.now();
+  //   final difference = now.difference(timestamp);
+
+  //   if (difference.inDays == 0) {
+  //     return '${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}';
+  //   } else if (difference.inDays == 1) {
+  //     return 'Yesterday ${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}';
+  //   } else {
+  //     return '${timestamp.day}/${timestamp.month}/${timestamp.year} ${timestamp.hour.toString().padLeft(2, '0')}:${timestamp.minute.toString().padLeft(2, '0')}';
+  //   }
+  // }
 
   String _formatDate(DateTime timestamp) {
     final now = DateTime.now();
