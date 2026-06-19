@@ -23,3 +23,27 @@ Before implementing any change:
 21. Chat opens in <100ms, no loaders, works offline, syncs in background!
 22. don't forget to add a comment to the code
 23. Do not create documentation or md or text or dart files for implemented summery.
+20. Implement only the required change with the smallest clean solution that solves the complete problem.
+21. LOW CODE, HIGH REUSABILITY
+- Prefer reusable widgets, services, extensions, utilities, and helpers.
+- Avoid duplicate code.
+- Extract common logic into reusable functions.
+- Follow DRY principles.
+UNDERSTAND FIRST
+- Read all related files before making changes.
+- Trace the complete flow from UI → ViewModel/Controller → Repository → API/Database.
+- Understand existing architecture, state management, navigation, models, and dependencies.
+- Do not assume behavior.
+- Identify root cause before coding.
+PLAN BEFORE IMPLEMENTATION
+- Create a short implementation plan.
+- List affected files.
+- List risks and edge cases.
+- Verify plan against existing architecture.
+- Reuse existing code whenever possible.
+ROOT CAUSE FIXES ONLY
+- Never apply temporary fixes.
+- Fix the actual source of the issue.
+- Check downstream and upstream dependencies.
+- Ensure no regression is introduced.
+

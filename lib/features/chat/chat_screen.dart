@@ -68,7 +68,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     with WidgetsBindingObserver {
   // final ScrollController _scrollController = ScrollController();
   final _scrollController = AutoScrollController();
-
+  int pageCount = 1;
   final TextEditingController _messageController = TextEditingController();
   final FocusNode _focusNode = FocusNode();
   late final ApiService _apiService;
@@ -107,6 +107,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   static const int _messagesPerPage = 11;
   final Set<String> _markedAsReadMessages = {}; // Track already marked messages
   int _markAsReadApiCallCount = 0; // Limit API calls to 2
+  int _loadedBatchCount = 0; // Tracks total batches of 25 messages loaded in UI
 
   @override
   void initState() {
@@ -130,12 +131,21 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
       _initializeChat();
       _handleInitialMessage();
-      try {
-        _refreshAfterAttendance();
-      } catch (e) {
-        print(e);
-      }
+
     });
+  }
+  @override
+  void didChangeDependencies() {
+    try {
+      if(widget.chatType.toString().toLowerCase() == 'group'){
+        _refreshAfterAttendance();
+      }
+
+    } catch (e) {
+      print(e);
+    }
+    // TODO: implement didChangeDependencies
+    super.didChangeDependencies();
   }
 
   var userRole;
@@ -334,14 +344,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                     ? _user!['member_list']
                     : null);
 
-            // Update chat list to reset unread count
-            ChatListUpdateService.updateOnMessageReceived(
-              chatId: widget.chatId,
-              chatType: widget.chatType,
-              attendanceGroup: _isAttendanceGroup == true,
-              lastMessage: _messages.isNotEmpty ? _messages.first.text : '',
-              incrementUnread: false,
-            );
+            // Only reset unread count, don't update lastMessageTime
+            // This prevents chat from moving when just opening it
+            ref.read(chatProvider.notifier).resetUnreadCount(widget.chatId);
           }
         });
       }
@@ -360,7 +365,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
   }
 
-  int pageCount = 1;
+
 
   /// Called after attendance is marked — resets page, clears stale cache,
   /// fetches page 1 from API, syncs to Firebase + SQLite, updates UI.
@@ -375,8 +380,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     try {
       final id = int.parse(widget.chatId);
       // Fetch fresh page 1 from API
+      debugPrint(
+          'API Call: GET Group _refreshAfterAttendance $pageCount');
+
       final response =
-          await _apiService.getGroupMessages(id, 1, ApiService.messageCount);
+          await _apiService.getGroupMessages(id, pageCount, ApiService.messageCount);
       final freshMessages = response.data;
 
       if (freshMessages.isEmpty) return;
@@ -430,11 +438,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     setState(() => _isLoadingOldMessages = true);
 
     try {
+      pageCount = _loadedBatchCount;
       final nextPage = pageCount + 1;
 
       if (_isAttendanceGroup == true) {
         // Fetch from API
         final id = int.parse(widget.chatId);
+        final nextPage = pageCount + 1;
+        debugPrint('API Call: GET Group _syncOldMessages page=$nextPage (current=$pageCount)');
         final response = await _apiService.getGroupMessages(
             id, nextPage, ApiService.messageCount);
         final apiMessages = response.data;
@@ -453,6 +464,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
         if (mounted) {
           setState(() {
+
             if (newMessages.isNotEmpty) {
               // Build a full dedup set from current UI messages
               final existingIds = <String>{
@@ -473,12 +485,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
               _messages.addAll(deduped);
               _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
             }
+            debugPrint('📊 pageCount: $pageCount → $nextPage');
             pageCount = nextPage;
+            _loadedBatchCount++; // Increment batch counter after loading 25 messages
+            debugPrint('📦 Loaded batches: $_loadedBatchCount (Total messages: ${_messages.length})');
             _isLoadingOldMessages = false;
           });
           debugPrint(
               '✅ _syncOldMessages(attendance) page=$nextPage '
-              'api=${apiMessages.length} newToUI=${newMessages.length}');
+              'api=${apiMessages.length} newToUI=${newMessages.length} totalMessages=${_messages.length}');
         }
       } else {
         // Non-attendance: load from Firebase/cache via existing flow
@@ -517,6 +532,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             _messages.addAll(deduped);
             _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
             pageCount = nextPage;
+            _loadedBatchCount++; // Increment batch counter for non-attendance groups
+            debugPrint('📦 Loaded batches: $_loadedBatchCount (Total messages: ${_messages.length})');
             _isLoadingOldMessages = false;
           });
           debugPrint('✅ _syncOldMessages page=$nextPage loaded=${apiMessages.length}');
@@ -637,6 +654,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         setState(() {
           _messages = cachedMessages; // Always set, even if empty
           _isLoadingPermissions = false; // ✅ ALWAYS hide loader, even offline
+          // Initialize batch count based on initial cached messages
+          _loadedBatchCount = (cachedMessages.length / 25).ceil();
+          debugPrint('📦 Initial batches from cache: $_loadedBatchCount (${cachedMessages.length} messages)');
         });
       }
 
@@ -731,12 +751,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     }
 
     try {
+      // Always load page 1 for initial sync (not pagination)
       final freshMessages = await _syncService.syncAttendanceGroupFromApi(
         chatId: widget.chatId,
         apiService: _apiService,
         currentUserId: _currentUserId,
         userRole: _userRoleCache,
-        page: pageCount,
+        page: 1, // Always fetch page 1 for initial/refresh load
         limit: ApiService.messageCount,
         append: append,
       );
@@ -803,7 +824,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       List<Message> messages = [];
 
       if (widget.chatType == 'group') {
-        final response = await _apiService.getGroupMessages(id, 1, limit);
+        pageCount =_loadedBatchCount;
+        debugPrint('API Call: GET Group _loadConversationMetadataFromApi $pageCount');
+        final response = await _apiService.getGroupMessages(id, pageCount, limit);
         userData = Map<String, dynamic>.from(response.user);
         messages = response.data;
       } else {
@@ -1119,6 +1142,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
     // Load more messages when scrolling to top (in reverse list, top = maxScrollExtent)
     final distanceFromTop = position.maxScrollExtent - position.pixels;
+    // Auto-load next page after viewing current batch of messages
+    // When user scrolls past 80% of loaded messages, fetch next page
     if (distanceFromTop <= 200 &&
         !_isLoadingOldMessages &&
         position.maxScrollExtent > 0) {

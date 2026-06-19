@@ -498,8 +498,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               .markAsRead(chat.id, chat.type, chat.attendanceGroup);
         }
 
-        debugPrint("Groupchat.attendanceGroup ${chat.toString()}");
+        debugPrint("Groupchat.attendanceGroup ${chat.type.toString()}");
         debugPrint("Groupchat.attendanceGroup ${chat.attendanceGroup}");
+
 
         if (chat.type == 'group') {
           await context.push(

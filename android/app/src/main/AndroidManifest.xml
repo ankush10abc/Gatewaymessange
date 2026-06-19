@@ -153,6 +153,17 @@
             <action android:name="android.intent.action.VIEW" />
             <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
         </intent>
+        <!-- Query for web browsers (required for url_launcher on Android 11+) -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="http" />
+        </intent>
     </queries>
 </manifest>
 

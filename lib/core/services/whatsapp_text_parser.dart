@@ -1,21 +1,131 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'dart:io';
 
 class WhatsAppTextParser {
+  // URL regex pattern - detects http/https URLs and www links
+  static final RegExp _urlPattern = RegExp(
+    r'(https?://[^\s]+)|(www\.[^\s]+)',
+    caseSensitive: false,
+  );
+
   static TextSpan parseText(String text, {TextStyle? baseStyle}) {
     final List<TextSpan> spans = [];
     final List<_TextSegment> segments = _parseSegments(text);
 
     for (final segment in segments) {
+      // Check if segment contains URLs
+      if (_urlPattern.hasMatch(segment.text)) {
+        spans.addAll(_parseUrlsInSegment(segment, baseStyle));
+      } else {
+        spans.add(TextSpan(
+          text: segment.text,
+          style: _getStyleForType(segment.type, baseStyle),
+        ));
+      }
+    }
+
+    return TextSpan(children: spans);
+  }
+
+  // Parse URLs within a text segment and create clickable links
+  static List<TextSpan> _parseUrlsInSegment(_TextSegment segment, TextStyle? baseStyle) {
+    final List<TextSpan> spans = [];
+    final String text = segment.text;
+    int lastIndex = 0;
+
+    for (final match in _urlPattern.allMatches(text)) {
+      // Add text before URL
+      if (match.start > lastIndex) {
+        spans.add(TextSpan(
+          text: text.substring(lastIndex, match.start),
+          style: _getStyleForType(segment.type, baseStyle),
+        ));
+      }
+
+      // Add clickable URL
+      final url = match.group(0)!;
       spans.add(TextSpan(
-        text: segment.text,
+        text: url,
+        style: _getStyleForType(segment.type, baseStyle).copyWith(
+          color: Colors.blue,
+          decoration: TextDecoration.underline,
+        ),
+        recognizer: TapGestureRecognizer()
+          ..onTap = () => _launchURL(url),
+      ));
+
+      lastIndex = match.end;
+    }
+
+    // Add remaining text after last URL
+    if (lastIndex < text.length) {
+      spans.add(TextSpan(
+        text: text.substring(lastIndex),
         style: _getStyleForType(segment.type, baseStyle),
       ));
     }
 
-    return TextSpan(children: spans);
+    return spans;
+  }
+
+  // Launch URL in browser
+  static Future<void> _launchURL(String urlString) async {
+    try {
+      // Add https:// prefix if missing
+      String url = urlString;
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        url = 'https://$url';
+      }
+
+      final Uri uri = Uri.parse(url);
+      
+      // Try to launch with different modes for better compatibility
+      bool launched = false;
+      
+      // First try: platformDefault (most compatible)
+      try {
+        launched = await launchUrl(
+          uri,
+          mode: LaunchMode.platformDefault,
+        );
+      } catch (e) {
+        debugPrint('⚠️ platformDefault failed: $e');
+      }
+      
+      // Second try: externalNonBrowserApplication
+      if (!launched) {
+        try {
+          launched = await launchUrl(
+            uri,
+            mode: LaunchMode.externalNonBrowserApplication,
+          );
+        } catch (e) {
+          debugPrint('⚠️ externalNonBrowserApplication failed: $e');
+        }
+      }
+      
+      // Third try: inAppBrowserView (fallback)
+      if (!launched) {
+        try {
+          launched = await launchUrl(
+            uri,
+            mode: LaunchMode.inAppBrowserView,
+          );
+        } catch (e) {
+          debugPrint('⚠️ inAppBrowserView failed: $e');
+        }
+      }
+      
+      if (!launched) {
+        debugPrint('❌ Could not launch URL: $url');
+      }
+    } catch (e) {
+      debugPrint('❌ Error launching URL: $e');
+    }
   }
 
   static List<_TextSegment> _parseSegments(String text) {

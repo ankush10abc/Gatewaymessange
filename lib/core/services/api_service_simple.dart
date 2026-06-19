@@ -681,9 +681,23 @@ class ApiService {
       int groupId, int page, int limit) async {
     debugPrint(
         'API Call: GET Group $baseUrl/api/messages/group/$groupId?page=$page&limit=$limit');
+    final StorageService _storage = StorageService();
+    final token = await _storage.getToken();
+    // debugPrint("API Request Headers: $token");
+    if (token != null && token.isNotEmpty) {
+      _dio.options.headers['Authorization'] = 'Bearer $token';
+    }
     final response = await _dio.get(
       '/api/messages/group/$groupId',
       queryParameters: {'page': page, 'limit': limit},
+      options: Options(
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'Authorization':'Bearer $token'
+          // Content-Type will be set automatically by Dio for FormData (multipart/form-data)
+        },
+      )
     );
     debugPrint(
         'API Response: GET $baseUrl/api/messages/group/$groupId?page=$page&limit=$limit - ${response.data}');
@@ -703,7 +717,7 @@ class ApiService {
       user: user,
       total: data['total'] ?? 0,
       page: data['current_page'] ?? 1,
-      limit: data['per_page'] ?? 50,
+      limit: data['per_page'] ?? 25,
     );
   }
 
