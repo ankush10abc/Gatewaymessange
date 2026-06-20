@@ -3,27 +3,72 @@ import 'package:hive/hive.dart';
 import '../models/chat_hive_model.dart';
 
 class HiveChatDataSource {
-  static const String _chatBoxName = 'chats_v1';
-  static const String _metadataBoxName = 'chat_metadata';
-  
+  // Box names are per-user so switching accounts never leaks another user's chats
+  static String _chatBoxName(String userId) => 'chats_v1_$userId';
+  static String _metadataBoxName(String userId) => 'chat_metadata_$userId';
+
   Box<ChatHiveModel>? _chatBox;
   Box? _metadataBox;
+  String? _userId; // Track which user's box is currently open
 
   static final HiveChatDataSource _instance = HiveChatDataSource._internal();
   factory HiveChatDataSource() => _instance;
   HiveChatDataSource._internal();
 
-  Future<void> initialize() async {
+  Future<void> initialize({String? userId}) async {
+    final targetUserId = userId ?? _userId;
+    if (targetUserId == null) {
+      debugPrint('⚠️ HiveChatDataSource.initialize called without userId');
+      return;
+    }
+
+    // If switching user — close old box first so we never mix data
+    if (_userId != null && _userId != targetUserId) {
+      debugPrint('🔄 User switch detected: $_userId → $targetUserId, closing old box');
+      await close();
+    }
+
+    _userId = targetUserId;
+
     if (_chatBox == null || !_chatBox!.isOpen) {
-      _chatBox = await Hive.openBox<ChatHiveModel>(_chatBoxName);
-      debugPrint('📦 Chat box opened: ${_chatBox!.length} chats');
-      
-      // Clean up any duplicate entries on initialization
+      _chatBox = await Hive.openBox<ChatHiveModel>(_chatBoxName(targetUserId));
+      debugPrint('📦 Chat box opened for user $targetUserId: ${_chatBox!.length} chats');
       await _cleanupDuplicates();
     }
-    
+
     if (_metadataBox == null || !_metadataBox!.isOpen) {
-      _metadataBox = await Hive.openBox(_metadataBoxName);
+      _metadataBox = await Hive.openBox(_metadataBoxName(targetUserId));
+    }
+  }
+
+  /// Clear all chats for the given user and close the box (called on logout)
+  Future<void> clearForUser(String userId) async {
+    final boxName = _chatBoxName(userId);
+    final metaBoxName = _metadataBoxName(userId);
+    try {
+      // Close if currently open
+      if (_chatBox != null && _chatBox!.isOpen && _userId == userId) {
+        await _chatBox!.clear();
+        await _chatBox!.close();
+        _chatBox = null;
+      } else if (await Hive.boxExists(boxName)) {
+        final box = await Hive.openBox<ChatHiveModel>(boxName);
+        await box.clear();
+        await box.close();
+      }
+      if (_metadataBox != null && _metadataBox!.isOpen && _userId == userId) {
+        await _metadataBox!.clear();
+        await _metadataBox!.close();
+        _metadataBox = null;
+      } else if (await Hive.boxExists(metaBoxName)) {
+        final box = await Hive.openBox(metaBoxName);
+        await box.clear();
+        await box.close();
+      }
+      _userId = null;
+      debugPrint('🧹 Cleared Hive chat data for user $userId');
+    } catch (e) {
+      debugPrint('❌ clearForUser error: $e');
     }
   }
 

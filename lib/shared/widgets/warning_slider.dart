@@ -10,12 +10,13 @@ class WarningSlider extends StatefulWidget {
 class _WarningSliderState extends State<WarningSlider>
     with SingleTickerProviderStateMixin {
   late AnimationController _animationController;
-  late Animation<Offset> _slideAnimation;
+  // Nullable — initialized only after first frame when layout is known
+  Animation<Offset>? _slideAnimation;
   bool _isEnglish = true;
   final GlobalKey _textKey = GlobalKey();
 
-  // Pixels per second — consistent speed on all screen sizes
-  static const double _scrollSpeed = 80.0;
+  // Medium fixed speed — readable on all screen sizes (px/sec)
+  static const double _scrollSpeed = 55.0;
 
   final String englishText =
       "All messages sent on the phone are for parents only. Please do not give mobile phones to children. The school does not assign any work to students via phone.";
@@ -26,10 +27,11 @@ class _WarningSliderState extends State<WarningSlider>
   void initState() {
     super.initState();
     _animationController = AnimationController(
-      duration: const Duration(seconds: 12), // overridden in _startAnimation
+      duration: const Duration(seconds: 20), // overridden in _startAnimation
       vsync: this,
     );
 
+    // Wait for first frame so layout + RenderBox are available
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _startAnimation();
     });
@@ -41,7 +43,7 @@ class _WarningSliderState extends State<WarningSlider>
     final screenWidth = MediaQuery.of(context).size.width;
 
     // Measure actual rendered text width via RenderBox
-    double contentWidth = screenWidth;
+    double contentWidth = screenWidth * 2;
     final renderBox = _textKey.currentContext?.findRenderObject() as RenderBox?;
     if (renderBox != null) {
       contentWidth = renderBox.size.width + 16 + 8 + 16 + 50; // padding + icon + spacer
@@ -53,18 +55,27 @@ class _WarningSliderState extends State<WarningSlider>
 
     _animationController.duration = Duration(milliseconds: durationMs);
 
-    _slideAnimation = Tween<Offset>(
+    // Build animation and assign atomically before starting
+    final animation = Tween<Offset>(
       begin: Offset(screenWidth / contentWidth, 0.0),
-      end: Offset(-1.0, 0.0),
+      end: const Offset(-1.0, 0.0),
     ).animate(CurvedAnimation(
       parent: _animationController,
       curve: Curves.linear,
     ));
 
+    // setState ensures AnimatedBuilder sees the non-null animation
+    if (mounted) {
+      setState(() {
+        _slideAnimation = animation;
+      });
+    }
+
     _animationController.forward(from: 0).then((_) {
       if (mounted) {
         setState(() {
           _isEnglish = !_isEnglish;
+          _slideAnimation = null; // Reset while next animation is prepared
         });
         WidgetsBinding.instance.addPostFrameCallback((_) => _startAnimation());
       }
@@ -85,39 +96,64 @@ class _WarningSliderState extends State<WarningSlider>
       child: ClipRect(
         child: OverflowBox(
           maxWidth: double.infinity,
-          child: AnimatedBuilder(
-            animation: _animationController,
-            builder: (context, child) => SlideTransition(
-              position: _slideAnimation,
-              child: child,
-            ),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.warning_amber_rounded,
-                    color: Colors.orange[800],
-                    size: 16,
+          // Guard: show static text until animation is initialized
+          child: _slideAnimation == null
+              ? Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.warning_amber_rounded,
+                          color: Colors.orange[800], size: 16),
+                      const SizedBox(width: 8),
+                      Text(
+                        _isEnglish ? englishText : hindiText,
+                        key: _textKey,
+                        style: TextStyle(
+                          color: Colors.orange[800],
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.visible,
+                      ),
+                      const SizedBox(width: 50),
+                    ],
                   ),
-                  const SizedBox(width: 8),
-                  Text(
-                    _isEnglish ? englishText : hindiText,
-                    key: _textKey,
-                    style: TextStyle(
-                      color: Colors.orange[800],
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
+                )
+              : AnimatedBuilder(
+                  animation: _animationController,
+                  builder: (context, child) => SlideTransition(
+                    position: _slideAnimation!,
+                    child: child,
+                  ),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.warning_amber_rounded,
+                          color: Colors.orange[800],
+                          size: 16,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          _isEnglish ? englishText : hindiText,
+                          key: _textKey,
+                          style: TextStyle(
+                            color: Colors.orange[800],
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.visible,
+                        ),
+                        const SizedBox(width: 50),
+                      ],
                     ),
-                    maxLines: 1,
-                    overflow: TextOverflow.visible,
                   ),
-                  const SizedBox(width: 50),
-                ],
-              ),
-            ),
-          ),
+                ),
         ),
       ),
     );

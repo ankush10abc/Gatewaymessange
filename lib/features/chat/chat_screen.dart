@@ -33,6 +33,7 @@ import '../../core/storage/storage_service.dart';
 import '../../core/utils/internet_checker.dart';
 import '../../shared/providers/auth_provider.dart';
 import '../../shared/providers/chat_provider.dart';
+import '../../shared/providers/optimized_chat_provider.dart';
 import '../../shared/widgets/document_preview_screen.dart';
 import '../../shared/widgets/enhanced_message_input.dart';
 import '../../shared/widgets/forward_message_dialog.dart';
@@ -329,7 +330,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         debugPrint('📴 Offline - skipping background sync');
       }
 
-      ref.read(chatProvider.notifier).resetUnreadCount(widget.chatId);
+      // Reset unread count via optimizedChatProvider so Hive + UI badge both update
+      final attendanceFlag = _isAttendanceGroup == true;
+      ref.read(optimizedChatProvider.notifier).markAsRead(
+        widget.chatId,
+        widget.chatType,
+        attendanceFlag,
+      );
 
       // Mark messages as read ONLY if online
       if (hasInternet) {
@@ -344,9 +351,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                     ? _user!['member_list']
                     : null);
 
-            // Only reset unread count, don't update lastMessageTime
-            // This prevents chat from moving when just opening it
-            ref.read(chatProvider.notifier).resetUnreadCount(widget.chatId);
+            // Reset unread count again after Firebase marks messages read
+            ref.read(optimizedChatProvider.notifier).markAsRead(
+              widget.chatId,
+              widget.chatType,
+              attendanceFlag,
+            );
           }
         });
       }
@@ -1314,7 +1324,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     }
 
     final results = _messages.where((msg) {
-      return msg.text.toLowerCase().contains(_searchQuery.toLowerCase());
+      return msg.text.toLowerCase().contains(_searchQuery.toLowerCase()) || msg.senderName != null && msg.senderName!.toLowerCase().contains(_searchQuery.toLowerCase());
     }).toList();
 
     setState(() {
@@ -2329,8 +2339,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   @override
   Widget build(BuildContext context) {
-    // final messageState = ref.watch(messageProvider);
-    final user = ref.watch(authProvider).user!;
+    // Guard: user can be null during logout (e.g. while forwarding messages)
+    final user = ref.watch(authProvider).user;
+    if (user == null) return const SizedBox.shrink();
 
     // debugPrint("_messages six $_messages");
     // debugPrint("_messages six ${_messages.length}");
@@ -3621,18 +3632,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     );
 
     try {
-      for (final chatId in chatIds) {
-        final chat = ref.read(chatProvider).chats.firstWhere(
-              (c) => c.id == chatId,
-              orElse: () => Chat(
-                id: chatId,
-                type: widget.chatType,
-                participants: [],
-                createdAt: DateTime.now(),
-                updatedAt: DateTime.now(),
-                unreadCount: {},
-              ),
-            );
+      for (final compositeKey in chatIds) {
+        // Parse composite key "type::id" set by ForwardMessageDialog
+        final parts = compositeKey.split('::');
+        final chatType = parts.length == 2 ? parts[0] : widget.chatType;
+        final chatId   = parts.length == 2 ? parts[1] : compositeKey;
+
+        debugPrint('📤 Forwarding to chatType=$chatType chatId=$chatId');
 
         final forwardedMessage = Message(
           id: 'temp_${DateTime.now().millisecondsSinceEpoch}',
@@ -3652,15 +3658,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         // Send to Firebase
         final firebaseKey = await FirebaseRealtimeService.sendMessage(
           forwardedMessage,
-          chatType: chat.type,
+          chatType: chatType,
           currentUserId: user.id,
           attendanceGroup: _isAttendanceGroup,
-          otherUserId: chat.type != 'group' ? chatId : '0',
+          otherUserId: chatType != 'group' ? chatId : '0',
         );
 
         // Send to API
         Message? msg;
-        if (chat.type == 'group') {
+        if (chatType == 'group') {
           msg = await _apiService.sendMessage(
             message: message.text,
             groupId: chatId,
@@ -3685,9 +3691,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         // Update Firebase with API msgId
         await FirebaseRealtimeService.updateMessage(
           forwardedMessage,
-          chatType: chat.type,
+          chatType: chatType,
           currentUserId: user.id,
-          otherUserId: chat.type != 'group' ? chatId : '0',
+          otherUserId: chatType != 'group' ? chatId : '0',
           attendanceGroup: _isAttendanceGroup,
           chatIdServer: msg.id.toString(),
           key: firebaseKey,

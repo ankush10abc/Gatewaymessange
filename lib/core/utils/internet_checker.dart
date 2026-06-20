@@ -35,7 +35,7 @@ class InternetChecker {
   static Future<bool> checkAndRedirect(BuildContext context) async {
     final hasConnection = await hasInternet();
     if (!hasConnection && context.mounted) {
-      context.go('/no-internet');
+      // context.go('/no-internet');
     }
     return hasConnection;
   }

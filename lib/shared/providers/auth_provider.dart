@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/app.dart';
+import '../../core/data/hive_chat_data_source.dart';
 import '../../core/models/user_model.dart';
 import '../../core/services/api_service_simple.dart';
 import '../../core/services/firebase_service.dart';
@@ -141,14 +142,18 @@ class AuthNotifier extends StateNotifier<AuthState> {
   }
 
   Future<void> _handleAuthFailure() async {
+    final userId = state.user?.id;
     await _storage.clearAll();
     _apiService.clearAuthToken();
+    if (userId != null) await HiveChatDataSource().clearForUser(userId);
     state = AuthState();
   }
 
   void _handle401Unauthorized() async {
+    final userId = state.user?.id;
     await _storage.clearAll();
     _apiService.clearAuthToken();
+    if (userId != null) await HiveChatDataSource().clearForUser(userId);
     state = AuthState();
   }
 
@@ -261,24 +266,28 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
   Future<void> logout() async {
     state = state.copyWith(isLoading: true);
+    final loggedOutUserId = state.user?.id;
 
     try {
       if (state.user != null) {
-        // Set user offline in Firebase and API
         await FirebaseService.setUserOffline(state.user!.id);
         await _apiService.setOfflineStatus();
       }
 
-      // Call logout API
       await _apiService.logout();
-
-      // Clear stored data
       await _storage.clearAll();
+
+      // Clear this user's Hive chat cache so the next user never sees stale data
+      if (loggedOutUserId != null) {
+        await HiveChatDataSource().clearForUser(loggedOutUserId);
+      }
 
       state = AuthState();
     } catch (e) {
-      // Even if API call fails, clear local data
       await _storage.clearAll();
+      if (loggedOutUserId != null) {
+        await HiveChatDataSource().clearForUser(loggedOutUserId);
+      }
       state = AuthState();
     }
   }

@@ -460,6 +460,7 @@ class ApiService {
           'API Response: POST $baseUrl/api/login - ${response.statusCode}');
       final authResponse = AuthResponse.fromJson(response.data);
       setAuthToken(authResponse.token);
+      debugPrint("Ankush Banawade ${authResponse.user.toJson()}");
       debugPrint("Ankush Banawade ${authResponse.user.role}");
       return authResponse;
     } on DioException catch (e) {

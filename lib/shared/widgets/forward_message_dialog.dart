@@ -1,8 +1,12 @@
+
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:fluttertoast/fluttertoast.dart';
 
 import '../../core/models/message_model.dart';
-import '../providers/chat_provider.dart';
+import '../../core/utils/internet_checker.dart';
+import '../providers/optimized_chat_provider.dart';
 
 class ForwardMessageDialog extends ConsumerStatefulWidget {
   final Message message;
@@ -20,12 +24,16 @@ class ForwardMessageDialog extends ConsumerStatefulWidget {
 }
 
 class _ForwardMessageDialogState extends ConsumerState<ForwardMessageDialog> {
-  final Set<String> _selectedChats = {};
-  final int _maxSelection = 5;
+  // Store composite key "type::id" to preserve both chatType and chatId unambiguously
+  final Set<String> _selectedKeys = {};
+
+  /// Builds a composite key from chat type and id
+  static String _key(String type, String id) => '$type::$id';
 
   @override
   Widget build(BuildContext context) {
-    final chatState = ref.watch(chatProvider);
+    // Use same provider as home screen so the same chat list is shown
+    final chatState = ref.watch(optimizedChatProvider);
 
     return Container(
       height: MediaQuery.of(context).size.height * 0.8,
@@ -59,10 +67,6 @@ class _ForwardMessageDialogState extends ConsumerState<ForwardMessageDialog> {
                     ),
                   ),
                 ),
-                // Text(
-                //   '${_selectedChats.length}/$_maxSelection',
-                //   style: const TextStyle(color: Colors.white70),
-                // ),
               ],
             ),
           ),
@@ -94,13 +98,13 @@ class _ForwardMessageDialogState extends ConsumerState<ForwardMessageDialog> {
             ),
           ),
 
-          // Chat List
+          // Chat List — filter out attendance groups, same as home screen
           Expanded(
-            child: chatState.isLoading
+            child: chatState.isInitialLoading
                 ? const Center(child: CircularProgressIndicator())
                 : Builder(builder: (context) {
                     final visibleChats = chatState.chats
-                        .where((c) => c.attendance_group != true)
+                        .where((c) => c.attendanceGroup != true)
                         .toList();
                     if (visibleChats.isEmpty) {
                       return const Center(child: Text('No chats available'));
@@ -109,10 +113,10 @@ class _ForwardMessageDialogState extends ConsumerState<ForwardMessageDialog> {
                       itemCount: visibleChats.length,
                       itemBuilder: (context, index) {
                         final chat = visibleChats[index];
-                        final isSelected = _selectedChats.contains(chat.id);
-                        debugPrint("chat.id${chat.id}");
-                        // final canSelect =
-                        //     _selectedChats.length < _maxSelection || isSelected;
+                        // Use composite key so group/user with same numeric id are distinct
+                        final compositeKey = _key(chat.type, chat.id);
+                        final isSelected = _selectedKeys.contains(compositeKey);
+                        if (chat.name == 'Unknown') return const SizedBox.shrink();
                         return ListTile(
                           leading: CircleAvatar(
                             backgroundColor: Colors.grey[300],
@@ -122,7 +126,7 @@ class _ForwardMessageDialogState extends ConsumerState<ForwardMessageDialog> {
                             ),
                           ),
                           title: Text(
-                            chat.groupName ?? chat.id,
+                            chat.name,
                             style: const TextStyle(color: Colors.black),
                           ),
                           subtitle: Text(
@@ -134,9 +138,9 @@ class _ForwardMessageDialogState extends ConsumerState<ForwardMessageDialog> {
                             onChanged: (value) {
                               setState(() {
                                 if (value == true) {
-                                  _selectedChats.add(chat.id);
+                                  _selectedKeys.add(compositeKey);
                                 } else {
-                                  _selectedChats.remove(chat.id);
+                                  _selectedKeys.remove(compositeKey);
                                 }
                               });
                             },
@@ -145,13 +149,12 @@ class _ForwardMessageDialogState extends ConsumerState<ForwardMessageDialog> {
                           onTap: () {
                             setState(() {
                               if (isSelected) {
-                                _selectedChats.remove(chat.id);
+                                _selectedKeys.remove(compositeKey);
                               } else {
-                                _selectedChats.add(chat.id);
+                                _selectedKeys.add(compositeKey);
                               }
                             });
                           },
-                          enabled: true,
                         );
                       },
                     );
@@ -164,12 +167,19 @@ class _ForwardMessageDialogState extends ConsumerState<ForwardMessageDialog> {
             child: SizedBox(
               width: double.infinity,
               child: ElevatedButton(
-                onPressed: _selectedChats.isNotEmpty
-                    ? () {
-                        final selectedIds = _selectedChats.toList();
-                        Navigator.pop(context);
-                        Future.microtask(() =>
-                            widget.onForward(widget.message, selectedIds));
+                onPressed: _selectedKeys.isNotEmpty
+                    ? () async {
+               bool hasInternet=   await InternetChecker.hasInternet();
+                  if(hasInternet == true){
+                    // Pass composite keys so _forwardMessage can extract type + id
+                    final selectedKeys = _selectedKeys.toList();
+                    Navigator.pop(context);
+                    Future.microtask(() =>
+                        widget.onForward(widget.message, selectedKeys));
+                  }else{
+                    Fluttertoast.showToast(msg: "Check your internet");
+                  }
+
                       }
                     : null,
                 style: ElevatedButton.styleFrom(
@@ -181,9 +191,9 @@ class _ForwardMessageDialogState extends ConsumerState<ForwardMessageDialog> {
                   ),
                 ),
                 child: Text(
-                  _selectedChats.isEmpty
+                  _selectedKeys.isEmpty
                       ? 'Select chats to forward'
-                      : 'Forward to ${_selectedChats.length} chat(s)',
+                      : 'Forward to ${_selectedKeys.length} chat(s)',
                   style: const TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,

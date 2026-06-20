@@ -22,8 +22,8 @@ class ChatRepository {
 
   SyncStatus get syncStatus => _syncStatus;
 
-  Future<void> initialize() async {
-    await _localDataSource.initialize();
+  Future<void> initialize({String? userId}) async {
+    await _localDataSource.initialize(userId: userId);
     await _imageCacheService.initialize();
     _isInitialFetch = _localDataSource.isEmpty();
     debugPrint('📚 Repository initialized. Initial fetch: $_isInitialFetch');

@@ -56,12 +56,20 @@ class OptimizedChatNotifier extends StateNotifier<OptimizedChatState> {
   OptimizedChatNotifier(this._repository) : super(OptimizedChatState());
 
   Future<void> initialize({required String userId}) async {
+    // If a different user was previously initialized, reset so new user gets a fresh load
+    if (_isInitialized && _currentUserId != userId) {
+      debugPrint('🔄 OptimizedChatNotifier: user switch $_currentUserId → $userId, resetting');
+      _isInitialized = false;
+      state = OptimizedChatState();
+    }
+
     if (_isInitialized) return;
 
     _currentUserId = userId;
 
     try {
-      await _repository.initialize();
+      // Pass userId so HiveChatDataSource opens the correct per-user box
+      await _repository.initialize(userId: userId);
       await _repository.initializeSync(userId);
 
       // Watch for real-time updates from repository
@@ -233,8 +241,11 @@ class OptimizedChatNotifier extends StateNotifier<OptimizedChatState> {
   }
 
   Future<void> markAsRead(String chatId, String chatType, bool attendance_group) async {
-    debugPrint("Ankush attendance_group $attendance_group");
-    await _repository.markChatAsRead(chatId, chatType, attendance_group ?? false);
+    await _repository.markChatAsRead(chatId, chatType, attendance_group);
+    // Refresh state so home screen badge updates immediately
+    final updatedChats = _repository.getCachedChats();
+    state = state.copyWith(chats: updatedChats);
+    debugPrint('✅ markAsRead: cleared badge for $chatType/$chatId');
   }
 
   int getTotalUnreadCount() {
