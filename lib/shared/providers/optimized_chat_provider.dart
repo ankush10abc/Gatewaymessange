@@ -195,6 +195,12 @@ class OptimizedChatNotifier extends StateNotifier<OptimizedChatState> {
     }
   }
 
+  /// Directly push a new chat list into state — used by FirebaseMessageListener
+  /// for instant badge updates without going through the full async sync chain
+  void forceUpdateChats(List<ChatHiveModel> chats) {
+    state = state.copyWith(chats: chats);
+  }
+
   Future<void> updateChatWithMessage({
     required String chatId,
     required String chatType,
@@ -205,7 +211,6 @@ class OptimizedChatNotifier extends StateNotifier<OptimizedChatState> {
     String? senderName,
     bool isIncoming = false,
   }) async {
-    // Use repository which internally uses sync service
     await _repository.updateChatWithNewMessage(
       chatId: chatId,
       chatType: chatType,
@@ -214,8 +219,12 @@ class OptimizedChatNotifier extends StateNotifier<OptimizedChatState> {
       lastMessageTime: lastMessageTime,
       isIncoming: isIncoming,
     );
-    
-    debugPrint('⬆️ Chat list updated - $chatType/$chatId moved to top');
+
+    // Immediately push updated Hive data into state so UI rebuilds
+    // without waiting for the Hive watch stream event
+    final updatedChats = _repository.getCachedChats();
+    state = state.copyWith(chats: updatedChats);
+    debugPrint('⬆️ Chat list updated - $chatType/$chatId | unread badge refreshed instantly');
   }
 
   Future<void> createChat(ChatHiveModel chat) async {

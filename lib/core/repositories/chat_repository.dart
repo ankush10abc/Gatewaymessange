@@ -47,9 +47,19 @@ class ChatRepository {
     return _localDataSource.isEmpty();
   }
 
+  DateTime? _lastSyncTime;
+  static const _syncCooldown = Duration(seconds: 10);
+
   Future<bool> syncChatsFromApi({bool force = false}) async {
     if (_syncStatus == SyncStatus.syncing && !force) {
       debugPrint('⚠️ Sync already in progress, skipping...');
+      return false;
+    }
+
+    // Throttle: skip if last sync was within cooldown window (unless forced)
+    if (!force && _lastSyncTime != null &&
+        DateTime.now().difference(_lastSyncTime!) < _syncCooldown) {
+      debugPrint('⏭️ syncChatsFromApi throttled — last sync ${DateTime.now().difference(_lastSyncTime!).inSeconds}s ago');
       return false;
     }
 
@@ -73,7 +83,7 @@ class ChatRepository {
       await _syncService.syncFromApi(apiChats);
       
       await _localDataSource.setLastSyncTime(DateTime.now());
-      
+      _lastSyncTime = DateTime.now();
       _syncStatus = SyncStatus.success;
       _isInitialFetch = false;
       

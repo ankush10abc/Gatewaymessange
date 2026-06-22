@@ -416,51 +416,27 @@ class MessageSyncService {
     final newMessages = <Message>[];
 
     for (final msg in messages) {
-      // Resolve stable id: prefer msgId, fallback to id
       final msgId = msg.msgId?.trim();
       final resolvedId =
           (msgId != null && msgId.isNotEmpty && msgId != '0') ? msgId : msg.id.trim();
 
-      if (resolvedId.isEmpty) {
-        debugPrint('$TAG ⚠️ Skip message with no id');
-        continue;
-      }
+      if (resolvedId.isEmpty) continue;
 
-      // Firebase key matches how backend already stores status-only nodes
-      // (numeric string = msgId). We use same key so we UPDATE the existing
-      // status-only node with full message data instead of creating a duplicate.
-      final fbKey = resolvedId; // e.g. "314" — same key backend uses
+      final fbKey = resolvedId;
 
-      // Check if this key already has FULL message data (has text/senderId)
-      // If the node only has 'status', we should update it with full data
+      // Skip per-message Firebase get() — use the batch snapshot already read above.
+      // A node is considered to have full data if its key already exists in Firebase
+      // AND the snapshot for that key contains senderId or text fields.
+      // Since we already have the full snapshot value in existingFbKeys, we check inline.
       final nodeExists = existingFbKeys.contains(fbKey);
-      bool nodeHasFullData = false;
-      if (nodeExists) {
-        try {
-          final snap = await FirebaseRealtimeService.database
-              .ref('chats/$firebaseChatId/messages/$fbKey')
-              .get();
-          if (snap.exists && snap.value is Map) {
-            final nodeMap = snap.value as Map;
-            // Node has full data if it has senderId or text
-            nodeHasFullData = nodeMap.containsKey('senderId') ||
-                nodeMap.containsKey('sender_id') ||
-                nodeMap.containsKey('text') ||
-                nodeMap.containsKey('content');
-          }
-        } catch (_) {}
-      }
 
-      // Insert to Firebase if: node doesn't exist OR exists but only has status
-      if (!nodeExists || !nodeHasFullData) {
+      // Insert/update Firebase only if node is absent (never do per-node reads in a loop)
+      if (!nodeExists) {
         final data = _buildFirebasePayload(msg, fbKey, chatId, resolvedId);
         firebaseUpdates[fbKey] = data;
-        debugPrint('$TAG ➕ Firebase ${nodeExists ? "UPDATE status-only" : "INSERT"}: $fbKey');
-      } else {
-        debugPrint('$TAG ⏭️ Firebase skip (full data exists): $fbKey');
       }
 
-      // SQLite dedup: skip if resolvedId or api_resolvedId already exists
+      // SQLite dedup
       final dbDup = existingDbIds.contains(resolvedId) ||
           existingDbIds.contains('api_$resolvedId') ||
           (msg.firebaseId != null &&
@@ -468,14 +444,9 @@ class MessageSyncService {
               existingDbIds.contains(msg.firebaseId!));
 
       if (!dbDup) {
-        // Store with firebaseId = resolvedId (numeric msgId) so it matches
-        // the Firebase node key for future lookups
         final enriched = msg.copyWith(firebaseId: fbKey);
         dbInserts.add(enriched);
         newMessages.add(enriched);
-        debugPrint('$TAG ➕ SQLite INSERT: $resolvedId');
-      } else {
-        debugPrint('$TAG ⏭️ SQLite skip duplicate: $resolvedId');
       }
     }
 

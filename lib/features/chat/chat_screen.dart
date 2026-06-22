@@ -377,67 +377,37 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
 
 
-  /// Called after attendance is marked — resets page, clears stale cache,
-  /// fetches page 1 from API, syncs to Firebase + SQLite, updates UI.
+  /// Called after attendance is marked — fetch page 1, show instantly, sync in background.
   Future<void> _refreshAfterAttendance() async {
     if (!mounted) return;
     final hasInternet = await InternetChecker.hasInternet();
     if (!hasInternet) return;
 
-    // Reset pagination so next "sync old" starts from page 2
     pageCount = 1;
 
     try {
       final id = int.parse(widget.chatId);
-      // Fetch fresh page 1 from API
-      debugPrint(
-          'API Call: GET Group _refreshAfterAttendance $pageCount');
-
-      final response =
-          await _apiService.getGroupMessages(id, pageCount, ApiService.messageCount);
+      final response = await _apiService.getGroupMessages(
+          id, 1, ApiService.messageCount);
       final freshMessages = response.data;
+      if (freshMessages.isEmpty || !mounted) return;
 
-      if (freshMessages.isEmpty) return;
+      // Show in UI immediately — do NOT wait for Firebase/SQLite sync
+      setState(() {
+        _messages = freshMessages;
+        _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+      });
 
-      // Sync to Firebase + SQLite (handles dedup internally)
-      final synced = await _syncService.syncOldMessagesToFirebaseAndDb(
+      // Sync to Firebase + SQLite in background (non-blocking)
+      unawaited(_syncService.syncOldMessagesToFirebaseAndDb(
         chatId: widget.chatId,
         chatType: widget.chatType,
         messages: freshMessages,
         currentUserId: _currentUserId,
         isAttendanceGroup: true,
-      );
+      ));
 
-      if (!mounted) return;
-
-      setState(() {
-        // Merge all fresh messages into UI with dedup
-        final existingIds = <String>{
-          for (final m in _messages) ...[
-            if ((m.firebaseId ?? '').isNotEmpty) m.firebaseId!,
-            if ((m.msgId ?? '').isNotEmpty && m.msgId != '0') m.msgId!,
-            if (m.id.isNotEmpty && m.id != '0') m.id,
-          ],
-        };
-        final newToUI = freshMessages.where((m) {
-          final fbId = m.firebaseId ?? '';
-          final mId = m.msgId ?? '';
-          return !existingIds.contains(fbId) &&
-              !(mId.isNotEmpty && mId != '0' && existingIds.contains(mId)) &&
-              !existingIds.contains(m.id);
-        }).toList();
-
-        if (newToUI.isNotEmpty) {
-          _messages.addAll(newToUI);
-        } else {
-          // Replace with fresh list to reflect any status/text changes
-          _messages = freshMessages;
-        }
-        _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-      });
-
-      debugPrint(
-          '✅ _refreshAfterAttendance: api=${freshMessages.length} synced=${synced.length}');
+      debugPrint('✅ _refreshAfterAttendance: shown=${freshMessages.length} (sync in bg)');
     } catch (e) {
       debugPrint('❌ _refreshAfterAttendance error: $e');
     }
@@ -448,35 +418,21 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     setState(() => _isLoadingOldMessages = true);
 
     try {
-      pageCount = _loadedBatchCount;
       final nextPage = pageCount + 1;
 
       if (_isAttendanceGroup == true) {
-        // Fetch from API
         final id = int.parse(widget.chatId);
-        final nextPage = pageCount + 1;
-        debugPrint('API Call: GET Group _syncOldMessages page=$nextPage (current=$pageCount)');
+        debugPrint('API Call: GET Group _syncOldMessages page=$nextPage');
+
+        // Fetch from API
         final response = await _apiService.getGroupMessages(
             id, nextPage, ApiService.messageCount);
         final apiMessages = response.data;
 
-        // Sync to Firebase + SQLite with full deduplication.
-        // Returns only genuinely new (non-duplicate) messages.
-        final newMessages = apiMessages.isNotEmpty
-            ? await _syncService.syncOldMessagesToFirebaseAndDb(
-                chatId: widget.chatId,
-                chatType: widget.chatType,
-                messages: apiMessages,
-                currentUserId: _currentUserId,
-                isAttendanceGroup: true,
-              )
-            : <Message>[];
-
         if (mounted) {
           setState(() {
-
-            if (newMessages.isNotEmpty) {
-              // Build a full dedup set from current UI messages
+            if (apiMessages.isNotEmpty) {
+              // Dedup against current UI messages by all known id fields
               final existingIds = <String>{
                 for (final m in _messages) ...[
                   if ((m.firebaseId ?? '').isNotEmpty) m.firebaseId!,
@@ -484,8 +440,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                   if (m.id.isNotEmpty && m.id != '0') m.id,
                 ],
               };
-              // Only append messages not already in UI
-              final deduped = newMessages.where((m) {
+              final deduped = apiMessages.where((m) {
                 final fbId = m.firebaseId ?? '';
                 final mId = m.msgId ?? '';
                 return !existingIds.contains(fbId) &&
@@ -495,18 +450,27 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
               _messages.addAll(deduped);
               _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
             }
-            debugPrint('📊 pageCount: $pageCount → $nextPage');
             pageCount = nextPage;
-            _loadedBatchCount++; // Increment batch counter after loading 25 messages
-            debugPrint('📦 Loaded batches: $_loadedBatchCount (Total messages: ${_messages.length})');
+            _loadedBatchCount++;
             _isLoadingOldMessages = false;
           });
-          debugPrint(
-              '✅ _syncOldMessages(attendance) page=$nextPage '
-              'api=${apiMessages.length} newToUI=${newMessages.length} totalMessages=${_messages.length}');
+
+          // Sync to Firebase + SQLite fully in background — never blocks UI
+          if (apiMessages.isNotEmpty) {
+            unawaited(_syncService.syncOldMessagesToFirebaseAndDb(
+              chatId: widget.chatId,
+              chatType: widget.chatType,
+              messages: apiMessages,
+              currentUserId: _currentUserId,
+              isAttendanceGroup: true,
+            ));
+          }
+
+          debugPrint('✅ _syncOldMessages(attendance) page=$nextPage '
+              'shown=${apiMessages.length} total=${_messages.length}');
         }
       } else {
-        // Non-attendance: load from Firebase/cache via existing flow
+        // Non-attendance: load from Firebase/cache
         final apiMessages = await _syncService.loadMoreMessages(
           chatId: widget.chatId,
           chatType: widget.chatType,
@@ -518,6 +482,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           limit: ApiService.messageCount,
         );
 
+        // Save to local DB in background
         if (apiMessages.isNotEmpty) {
           unawaited(_syncService.addMessageToLocaldatabasefromApi(
             widget.chatId,
@@ -542,8 +507,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             _messages.addAll(deduped);
             _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
             pageCount = nextPage;
-            _loadedBatchCount++; // Increment batch counter for non-attendance groups
-            debugPrint('📦 Loaded batches: $_loadedBatchCount (Total messages: ${_messages.length})');
+            _loadedBatchCount++;
             _isLoadingOldMessages = false;
           });
           debugPrint('✅ _syncOldMessages page=$nextPage loaded=${apiMessages.length}');
@@ -2674,7 +2638,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
                                   content:
-                                      Text('Attendance marked successfully')),
+                                      Text('Attendance marked successfully. Please wait while the chat is loading')),
                             );
                             // Reset page and refresh attendance data
                             await _refreshAfterAttendance();

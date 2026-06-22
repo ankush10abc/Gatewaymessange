@@ -176,19 +176,13 @@ class ChatListSyncService {
     debugPrint('📬 Updating chat $key with new message');
 
     try {
-      // Update Firebase
-      await _chatListRef.child(_currentUserId!).child(key).update({
-        'last_message': lastMessage,
-        'last_message_time': lastMessageTime.millisecondsSinceEpoch,
-        'last_message_time_iso': lastMessageTime.toIso8601String(),
-        'sort_time': lastMessageTime.millisecondsSinceEpoch,
-        'updated_at': DateTime.now().millisecondsSinceEpoch,
-        if (senderId != null) 'last_sender_id': senderId,
-        if (senderName != null) 'last_sender_name': senderName,
-      });
-      debugPrint('✅ Firebase: Updated $key');
+      // Read current unread count from Hive first
+      final existing = _hiveDataSource.getChatById(chatId, chatType, attendanceGroup);
+      final newUnread = incrementUnread
+          ? (existing?.unreadCount ?? 0) + 1
+          : (existing?.unreadCount ?? 0);
 
-      // Update Hive (with unread increment if needed)
+      // Update Hive first (source of truth for UI)
       await _hiveDataSource.updateChatLastMessage(
         chatId: chatId,
         chatType: chatType,
@@ -197,7 +191,21 @@ class ChatListSyncService {
         lastMessageTime: lastMessageTime,
         incrementUnread: incrementUnread,
       );
-      debugPrint('✅ Hive: Updated $key');
+      debugPrint('✅ Hive: Updated $key unread=$newUnread');
+
+      // Update Firebase WITH unread_count so _handleFirebaseUpdate
+      // never reverts the incremented count back to 0
+      await _chatListRef.child(_currentUserId!).child(key).update({
+        'last_message': lastMessage,
+        'last_message_time': lastMessageTime.millisecondsSinceEpoch,
+        'last_message_time_iso': lastMessageTime.toIso8601String(),
+        'sort_time': lastMessageTime.millisecondsSinceEpoch,
+        'updated_at': DateTime.now().millisecondsSinceEpoch,
+        'unread_count': newUnread, // keep Firebase in sync with Hive
+        if (senderId != null) 'last_sender_id': senderId,
+        if (senderName != null) 'last_sender_name': senderName,
+      });
+      debugPrint('✅ Firebase: Updated $key unread=$newUnread');
     } catch (e) {
       debugPrint('❌ Failed to update chat $key: $e');
     }
@@ -257,6 +265,12 @@ class ChatListSyncService {
 
         final sortTime = _asDateTime(chatData['sort_time']) ?? lastMsgTime;
 
+        // Never overwrite a higher local unread count with a lower Firebase value.
+        // Local Hive is the source of truth for unread badge.
+        final firebaseUnread = _asInt(chatData['unread_count'], fallback: existingChat.unreadCount);
+        final localUnread = existingChat.unreadCount;
+        final resolvedUnread = firebaseUnread > localUnread ? firebaseUnread : localUnread;
+
         final updated = ChatHiveModel(
           id: chatId,
           type: chatType,
@@ -267,10 +281,7 @@ class ChatListSyncService {
           lastMessage:
               chatData['last_message']?.toString() ?? existingChat.lastMessage,
           lastMessageTime: lastMsgTime,
-          unreadCount: _asInt(
-            chatData['unread_count'],
-            fallback: existingChat.unreadCount,
-          ),
+          unreadCount: resolvedUnread,
           isPinned: chatData.containsKey('is_pinned')
               ? _asBool(chatData['is_pinned'])
               : existingChat.isPinned,

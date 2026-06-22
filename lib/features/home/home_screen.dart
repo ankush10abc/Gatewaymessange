@@ -89,18 +89,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             .read(optimizedChatProvider.notifier)
             .initialize(userId: user.id);
       }
+      // FirebaseMessageListener handles both onMessage and onMessageOpenedApp
       FirebaseMessageListener.init(ref);
       initUI();
-    });
-
-    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
-      debugPrint('📥 Received foreground notification: ${message.data}');
-      _handleIncomingMessage(message.data);
-    });
-
-    FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
-      debugPrint('🔔 Notification opened app: ${message.data}');
-      _handleIncomingMessage(message.data);
     });
   }
 
@@ -472,16 +463,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       },
       child: ListView.builder(
         itemCount: chatState.chats.length,
-        physics: const BouncingScrollPhysics(),
+        // AlwaysScrollableScrollPhysics ensures pull-to-refresh works
+        // even when the list is short and doesn't fill the screen
+        physics: const AlwaysScrollableScrollPhysics(
+          parent: BouncingScrollPhysics(),
+        ),
         addRepaintBoundaries: true,
         itemBuilder: (context, index) {
           final chat = chatState.chats[index];
-          if(index == 1){
-            debugPrint("Groupchat.attendanceGroup ${chat.toJson()}");
-            debugPrint("Groupchat.attendanceGroup ${chat.attendanceGroup}");
-
-          }
-
           return _buildChatTile(chat);
         },
       ),
