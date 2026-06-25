@@ -4,9 +4,9 @@ import 'package:go_router/go_router.dart';
 import 'package:dio/dio.dart';
 import '../../app/app.dart';
 import '../../core/services/deep_link_service.dart';
-import '../../shared/providers/chat_provider.dart';
+import '../../shared/providers/optimized_chat_provider.dart';
 import '../../shared/providers/auth_provider.dart';
-import '../../core/models/chat_model.dart';
+import '../../core/models/chat_hive_model.dart';
 import '../../core/models/message_model.dart';
 import '../../core/services/whatsapp_text_parser.dart';
 import '../../core/services/api_service_simple.dart';
@@ -26,7 +26,8 @@ class ChatDeepLinkingScreen extends ConsumerStatefulWidget {
 
 class _ChatDeepLinkingScreenState extends ConsumerState<ChatDeepLinkingScreen> {
   String? _selectedChatId;
-  String? _actual_role;
+  String? _selectedChatType;
+  String? _selectedChatName;
   late final ApiService _apiService;
   final StorageService _storage = StorageService();
   final TextEditingController _searchController = TextEditingController();
@@ -39,8 +40,15 @@ class _ChatDeepLinkingScreenState extends ConsumerState<ChatDeepLinkingScreen> {
     final dio = Dio();
     _apiService = ApiService(dio);
     _initializeAuth();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(chatProvider.notifier).loadChatList();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final user = ref.read(authProvider).user;
+      if (user != null) {
+        // Initialize optimizedChatProvider — loads from Hive cache instantly,
+        // then syncs from API in background. Works from kill state too.
+        await ref
+            .read(optimizedChatProvider.notifier)
+            .initialize(userId: user.id);
+      }
     });
   }
 
@@ -59,13 +67,15 @@ class _ChatDeepLinkingScreenState extends ConsumerState<ChatDeepLinkingScreen> {
   }
   @override
   Widget build(BuildContext context) {
-    final chatState = ref.watch(chatProvider);
+    final chatState = ref.watch(optimizedChatProvider);
     final user = ref.watch(authProvider).user;
 
+    // Filter: exclude attendance groups, apply search
     final filteredChats = chatState.chats.where((chat) {
+      if (chat.attendanceGroup == true) return false;
+      if (chat.id.isEmpty || chat.name == 'Unknown') return false;
       if (_searchQuery.isEmpty) return true;
-      final chatName = chat.getDisplayName(user?.id ?? '', []).toLowerCase();
-      return chatName.contains(_searchQuery.toLowerCase());
+      return chat.name.toLowerCase().contains(_searchQuery.toLowerCase());
     }).toList();
 
     return PopScope(
@@ -172,7 +182,7 @@ class _ChatDeepLinkingScreenState extends ConsumerState<ChatDeepLinkingScreen> {
 
             // Chat List
             Expanded(
-              child: chatState.isLoading
+              child: chatState.isInitialLoading
                   ? const Center(child: CircularProgressIndicator())
                   : filteredChats.isEmpty
                       ? Center(
@@ -192,71 +202,75 @@ class _ChatDeepLinkingScreenState extends ConsumerState<ChatDeepLinkingScreen> {
                           itemCount: filteredChats.length,
                           itemBuilder: (context, index) {
                             final chat = filteredChats[index];
-                            // debugPrint("chattoJson${chat.toJson()}");
-                            final isSelected = _selectedChatId == chat.id && _actual_role == chat.actual_role  ;
-                            final attendance_group = filteredChats[index].attendance_group ?? false;
-                            final chatName = chat.getDisplayName(user?.id ?? '', []);
+                            final isSelected = _selectedChatId == chat.id &&
+                                _selectedChatType == chat.type;
 
-                            return
-                              attendance_group == true ? SizedBox() :
-                              Container(
-                              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                            return Container(
+                              margin: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 4),
                               decoration: BoxDecoration(
                                 borderRadius: BorderRadius.circular(12),
                                 border: Border.all(
-                                  color: isSelected && attendance_group == false ? Colors.blue : Colors.transparent,
+                                  color: isSelected
+                                      ? Colors.blue
+                                      : Colors.transparent,
                                   width: 2,
                                 ),
                               ),
                               child: ListTile(
                                 onTap: () {
-                                  if(attendance_group == true ){
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(content: Text('Message not sent to chat')),
-                                    );
-
-                                  }else{
-                                    setState(() {
-                                      debugPrint("Ankush ${chat.id} $attendance_group");
-                                      _selectedChatId = chat.id;
-                                      _actual_role = chat.actual_role;
-                                    });
-                                  }
-
+                                  setState(() {
+                                    _selectedChatId = chat.id;
+                                    _selectedChatType = chat.type;
+                                    _selectedChatName = chat.name;
+                                  });
                                 },
                                 leading: CircleAvatar(
-                                  backgroundColor: isSelected  && attendance_group == false ?  Colors.blue : Colors.grey.shade300,
+                                  backgroundColor: isSelected
+                                      ? Colors.blue
+                                      : Colors.grey.shade300,
                                   child: Text(
-                                    chatName[0].toUpperCase(),
+                                    chat.name[0].toUpperCase(),
                                     style: TextStyle(
-                                      color: isSelected && attendance_group == false ?  Colors.white : Colors.black87,
+                                      color: isSelected
+                                          ? Colors.white
+                                          : Colors.black87,
                                       fontWeight: FontWeight.bold,
                                     ),
                                   ),
                                 ),
                                 title: Text(
-                                  chatName,
+                                  chat.name,
                                   style: TextStyle(
-                                    fontWeight: isSelected && attendance_group == false ?  FontWeight.bold : FontWeight.normal,
+                                    fontWeight: isSelected
+                                        ? FontWeight.bold
+                                        : FontWeight.normal,
                                   ),
                                 ),
                                 subtitle: Row(
                                   children: [
                                     Icon(
-                                      chat.type == 'group' ? Icons.group : Icons.person,
+                                      chat.type == 'group'
+                                          ? Icons.group
+                                          : Icons.person,
                                       size: 14,
                                       color: Colors.grey.shade600,
                                     ),
                                     const SizedBox(width: 4),
                                     Text(
-                                      chat.type == 'group' ? 'Group' : 'Personal',
-                                      style: TextStyle(color: Colors.grey.shade600),
+                                      chat.type == 'group'
+                                          ? 'Group'
+                                          : 'Personal',
+                                      style: TextStyle(
+                                          color: Colors.grey.shade600),
                                     ),
                                   ],
                                 ),
                                 trailing: isSelected
-                                    && attendance_group == false ?  Icon(Icons.check_circle, color: Colors.blue, size: 28)
-                                    : Icon(Icons.circle_outlined, color: Colors.grey.shade400, size: 28),
+                                    ? const Icon(Icons.check_circle,
+                                        color: Colors.blue, size: 28)
+                                    : Icon(Icons.circle_outlined,
+                                        color: Colors.grey.shade400, size: 28),
                               ),
                             );
                           },
@@ -309,25 +323,31 @@ class _ChatDeepLinkingScreenState extends ConsumerState<ChatDeepLinkingScreen> {
 
   void _sendToSelectedChat() async {
     if (_selectedChatId == null || _isSending) return;
-    debugPrint("Ankush $_selectedChatId");
-    setState(() {
-      _isSending = true;
-    });
+    setState(() => _isSending = true);
 
     final user = ref.read(authProvider).user;
     if (user == null) {
-      setState(() {
-        _isSending = false;
-      });
+      setState(() => _isSending = false);
       return;
     }
 
-    final chat = ref.read(chatProvider).chats.firstWhere((c) => c.id == _selectedChatId  && c.actual_role == _actual_role);
-    final chatName = chat.getDisplayName(user.id, []);
+    // Look up chat from optimizedChatProvider
+    final allChats = ref.read(optimizedChatProvider).chats;
+    final ChatHiveModel? chat = allChats.where(
+      (c) => c.id == _selectedChatId && c.type == _selectedChatType,
+    ).isNotEmpty
+        ? allChats.firstWhere(
+            (c) => c.id == _selectedChatId && c.type == _selectedChatType)
+        : null;
+
+    if (chat == null) {
+      setState(() => _isSending = false);
+      return;
+    }
+
+    final chatName = _selectedChatName ?? chat.name;
+
     try {
-      final chat = ref.read(chatProvider).chats.firstWhere((c) => c.id == _selectedChatId && c.actual_role == _actual_role);
-      // final actual_role = ref.read(chatProvider).chats.firstWhere((c) => c.actual_role == _selectedChatId);
-        debugPrint("chattoJson${chat.toJson()}");
       final message = Message(
         id: 'temp_${DateTime.now().millisecondsSinceEpoch}',
         chatId: _selectedChatId!,
@@ -340,12 +360,11 @@ class _ChatDeepLinkingScreenState extends ConsumerState<ChatDeepLinkingScreen> {
       );
 
       // Send to Firebase
-      debugPrint("It is comming two times$_selectedChatId");
       final firebaseKey = await FirebaseRealtimeService.sendMessage(
         message,
         chatType: chat.type,
         currentUserId: user.id,
-        otherUserId: chat.type != 'group' ? _selectedChatId ?? '1' : '0',
+        otherUserId: chat.type != 'group' ? _selectedChatId! : '0',
       );
 
       // Send to API
@@ -358,48 +377,39 @@ class _ChatDeepLinkingScreenState extends ConsumerState<ChatDeepLinkingScreen> {
           firebaseKey: firebaseKey,
         );
       } else {
-        debugPrint("Ankush $_selectedChatId");
         msg = await _apiService.sendMessage(
           message: widget.message,
-          receiverId: _selectedChatId ?? '1',
+          receiverId: _selectedChatId!,
           messageType: 'text',
           firebaseKey: firebaseKey,
         );
       }
 
-      // Update Firebase with API msgId
+      // Update Firebase with server msgId
       await FirebaseRealtimeService.updateMessage(
         message,
         chatType: chat.type,
         currentUserId: user.id,
-        otherUserId: chat.type != 'group' ? _selectedChatId ??'1' : '0',
+        otherUserId: chat.type != 'group' ? _selectedChatId! : '0',
         chatIdServer: msg.id.toString(),
         key: firebaseKey,
       );
     } catch (e) {
-      debugPrint('Error sending to chat $_selectedChatId: $e');
-      if (mounted) {
-        setState(() {
-          _isSending = false;
-        });
-      }
+      debugPrint('Error sending deep link message: $e');
+      if (mounted) setState(() => _isSending = false);
       return;
     }
 
-    // Clear pending message and navigate to chat screen
     DeepLinkService.setPendingMessage(null);
-    
     if (mounted) {
-      // Navigate directly to chat screen without initialMessage since message already sent
       context.go('/home');
       await Future.delayed(const Duration(milliseconds: 100));
-      
       if (mounted) {
         Navigator.push(
           context,
           MaterialPageRoute(
             builder: (context) => ChatScreen(
-              chatId: _selectedChatId ?? '1',
+              chatId: _selectedChatId!,
               chatType: chat.type,
               chatName: chatName,
             ),

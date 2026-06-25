@@ -1,8 +1,14 @@
+import 'dart:async';
+import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
+import '../../core/models/message_model.dart';
 import '../../core/services/api_service_simple.dart';
+import '../../core/services/firebase_realtime_service.dart';
+import '../../core/services/message_database_service.dart';
 import '../../core/services/time_service.dart';
+import '../../core/utils/chat_utils.dart';
 
 class MarkAttendanceScreen extends StatefulWidget {
   final String groupId;
@@ -195,13 +201,16 @@ class _MarkAttendanceScreenState extends State<MarkAttendanceScreen> {
     }
 
     try {
-      await widget.apiService.markAttendance(
+      final responseData = await widget.apiService.markAttendance(
         groupId: int.parse(widget.groupId),
         action: action,
         latitude: position.latitude,
         longitude: position.longitude,
         remark: _remarkController.text.toString().trim(),
       );
+
+      // Sync the attendance message to Firebase + SQLite immediately
+      unawaited(_syncAttendanceMessage(responseData));
 
       if (mounted) {
         Navigator.pop(context, true);
@@ -218,6 +227,92 @@ class _MarkAttendanceScreenState extends State<MarkAttendanceScreen> {
         );
         _isSubmitting = false;
       });
+    }
+  }
+
+  /// Syncs the attendance message returned by the API into Firebase + SQLite
+  /// so it appears instantly in the attendance group chat (attendanceGroup=true path).
+  /// Syncs the attendance message from the API response into Firebase + SQLite
+  /// using the same write path as chat_screen.dart for consistency.
+  Future<void> _syncAttendanceMessage(Map<String, dynamic> responseData) async {
+    try {
+      // New API response IS the message object directly
+      final msgId = responseData['id']?.toString();
+      if (msgId == null || msgId.isEmpty) return;
+
+      final groupId = widget.groupId;
+      final senderId = responseData['sender_id']?.toString() ??
+          (responseData['sender'] as Map?)?['id']?.toString() ?? '';
+      final senderName =
+          (responseData['sender'] as Map?)?['name']?.toString() ?? '';
+      final content = responseData['content']?.toString() ??
+          responseData['text']?.toString() ?? '';
+      final type = responseData['type']?.toString() ?? 'text';
+      final fileUrl = responseData['file_url']?.toString();
+
+      // Parse timestamp from created_at
+      final createdAt = responseData['created_at']?.toString() ?? '';
+      final timestamp =
+          DateTime.tryParse(createdAt)?.toLocal() ?? DateTime.now();
+
+      // Firebase path for attendance group: group_${groupId}true
+      final firebaseChatId = ChatUtils.generateChatId(
+        groupId,
+        chatType: 'group',
+        attendanceGroup: true,
+      );
+
+      // Build the exact same Firebase payload as FirebaseRealtimeService uses
+      final firebasePayload = <String, dynamic>{
+        'id': msgId,
+        'msgId': msgId,
+        'firebaseId': msgId,
+        'chatId': groupId,
+        'senderId': senderId,
+        'sender_id': senderId,
+        'senderName': senderName,
+        'sender_name': senderName,
+        'text': content,
+        'content': content,
+        'message': content,
+        'type': type,
+        'timestamp': timestamp.millisecondsSinceEpoch,
+        'status': {'default': 'sent'},
+        if (fileUrl != null && fileUrl.isNotEmpty) 'file_url': fileUrl,
+      };
+
+      // Write to Firebase — message node + update chat metadata
+      await Future.wait([
+        FirebaseRealtimeService.database
+            .ref('chats/$firebaseChatId/messages/$msgId')
+            .set(firebasePayload),
+        FirebaseRealtimeService.database
+            .ref('chats/$firebaseChatId')
+            .update({
+          'lastMessage': firebasePayload,
+          'updatedAt': ServerValue.timestamp,
+        }),
+      ]);
+
+      // Build Message object and save to SQLite
+      final message = Message(
+        id: msgId,
+        msgId: msgId,
+        chatId: groupId,
+        senderId: senderId,
+        senderName: senderName,
+        text: content,
+        type: type,
+        timestamp: timestamp,
+        status: const {'default': 'sent'},
+        firebaseId: msgId,
+        fileUrl: fileUrl,
+      );
+      await MessageDatabaseService().saveMessages([message], groupId, 'group');
+
+      debugPrint('✅ Attendance message $msgId synced → $firebaseChatId');
+    } catch (e) {
+      debugPrint('❌ _syncAttendanceMessage error: $e');
     }
   }
 

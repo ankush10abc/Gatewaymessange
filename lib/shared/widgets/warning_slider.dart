@@ -15,8 +15,12 @@ class _WarningSliderState extends State<WarningSlider>
   bool _isEnglish = true;
   final GlobalKey _textKey = GlobalKey();
 
-  // Medium fixed speed — readable on all screen sizes (px/sec)
-  static const double _scrollSpeed = 55.0;
+  // Target scroll speed in logical pixels per second (device-independent).
+  // AnimationController duration is physics-based, not frame-rate-based,
+  // so this produces identical perceived speed on 60Hz, 90Hz, and 120Hz devices.
+  static const double _pixelsPerSecond = 55.0;
+  // Hard floor: even on tiny screens the animation never finishes in <12s
+  static const int _minDurationMs = 12000;
 
   final String englishText =
       "All messages sent on the phone are for parents only. Please do not give mobile phones to children. The school does not assign any work to students via phone.";
@@ -51,7 +55,10 @@ class _WarningSliderState extends State<WarningSlider>
 
     // Total travel = screen width (start off-right) + content width (end off-left)
     final totalPixels = screenWidth + contentWidth;
-    final durationMs = (totalPixels / _scrollSpeed * 1000).round();
+    // Duration derived from physics (px ÷ px/s = seconds), NOT from frame rate.
+    // This makes speed identical on all refresh-rate devices (60/90/120Hz).
+    final durationMs =
+        ((totalPixels / _pixelsPerSecond) * 1000).round().clamp(_minDurationMs, 40000);
 
     _animationController.duration = Duration(milliseconds: durationMs);
 

@@ -17,7 +17,7 @@ class NotificationHandler {
     if (_initialized) return;
 
     try {
-      const androidSettings = AndroidInitializationSettings('ic_launcher');
+      const androidSettings = AndroidInitializationSettings('ic_notification');
       const iosSettings = DarwinInitializationSettings();
       const initSettings = InitializationSettings(
         android: androidSettings,
@@ -133,13 +133,15 @@ class NotificationHandler {
     Map<String, dynamic>? data,
   }) async {
     try {
+      // Small icon (white silhouette) + Large icon (colored, preserves original colors)
       const androidDetails = AndroidNotificationDetails(
         'chat_messages',
         'Chat Messages',
         channelDescription: 'Notifications for chat messages',
         importance: Importance.high,
         priority: Priority.high,
-        icon: 'ic_launcher',
+        icon: 'ic_notification',
+        largeIcon: DrawableResourceAndroidBitmap('ic_notification_colored'),
         showWhen: true,
         autoCancel: true,
       );

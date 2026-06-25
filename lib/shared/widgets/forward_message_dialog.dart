@@ -26,6 +26,7 @@ class ForwardMessageDialog extends ConsumerStatefulWidget {
 class _ForwardMessageDialogState extends ConsumerState<ForwardMessageDialog> {
   // Store composite key "type::id" to preserve both chatType and chatId unambiguously
   final Set<String> _selectedKeys = {};
+  static const int _maxSelection = 5;
 
   /// Builds a composite key from chat type and id
   static String _key(String type, String id) => '$type::$id';
@@ -67,6 +68,15 @@ class _ForwardMessageDialogState extends ConsumerState<ForwardMessageDialog> {
                     ),
                   ),
                 ),
+                // Selection counter
+                Text(
+                  '${_selectedKeys.length}/$_maxSelection',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 14,
+                  ),
+                ),
+                const SizedBox(width: 8),
               ],
             ),
           ),
@@ -138,7 +148,16 @@ class _ForwardMessageDialogState extends ConsumerState<ForwardMessageDialog> {
                             onChanged: (value) {
                               setState(() {
                                 if (value == true) {
-                                  _selectedKeys.add(compositeKey);
+                                  if (_selectedKeys.length < _maxSelection) {
+                                    _selectedKeys.add(compositeKey);
+                                  } else {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text('You can forward to maximum 5 chats'),
+                                        duration: Duration(seconds: 2),
+                                      ),
+                                    );
+                                  }
                                 } else {
                                   _selectedKeys.remove(compositeKey);
                                 }
@@ -150,8 +169,15 @@ class _ForwardMessageDialogState extends ConsumerState<ForwardMessageDialog> {
                             setState(() {
                               if (isSelected) {
                                 _selectedKeys.remove(compositeKey);
-                              } else {
+                              } else if (_selectedKeys.length < _maxSelection) {
                                 _selectedKeys.add(compositeKey);
+                              } else {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('You can forward to maximum 5 chats'),
+                                    duration: Duration(seconds: 2),
+                                  ),
+                                );
                               }
                             });
                           },

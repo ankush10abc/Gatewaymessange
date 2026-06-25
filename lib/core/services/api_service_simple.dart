@@ -823,7 +823,7 @@ class ApiService {
   }
 
   // Attendance APIs
-  Future<void> markAttendance({
+  Future<Map<String, dynamic>> markAttendance({
     required int groupId,
     required String action,
     required double latitude,
@@ -843,6 +843,8 @@ class ApiService {
       final response = await _dio.post('/api/attendance/mark', data: request);
       debugPrint(
           'API Response: POST $baseUrl/api/attendance/mark - $response Success');
+      // Return full response data so caller can sync group_message_id to Firebase/SQLite
+      return Map<String, dynamic>.from(response.data ?? {});
     } on DioException catch (e) {
       _logApiError(e, 'Mark Attendance');
       final message =

@@ -21,7 +21,7 @@ class NotificationService {
       );
 
       // Initialize local notifications
-      const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+      const androidSettings = AndroidInitializationSettings('ic_notification');
       const iosSettings = DarwinInitializationSettings();
       const initSettings = InitializationSettings(
         android: androidSettings,
@@ -50,12 +50,15 @@ class NotificationService {
     debugPrint('Foreground message: ${message.data}');
     debugPrint("$TAG initializeic_launcher $message");
     // Show local notification for foreground messages
+    // Small icon (white silhouette) + Large icon (colored, preserves original colors)
     const androidDetails = AndroidNotificationDetails(
       'chat_channel',
       'Chat Messages',
       channelDescription: 'Notifications for chat messages',
       importance: Importance.high,
       priority: Priority.high,
+      icon: 'ic_notification',
+      largeIcon: DrawableResourceAndroidBitmap('ic_notification_colored'),
     );
     
     const iosDetails = DarwinNotificationDetails();

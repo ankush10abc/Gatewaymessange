@@ -7,8 +7,21 @@ import 'dart:io';
 
 class WhatsAppTextParser {
   // URL regex pattern - detects http/https URLs and www links
+
   static final RegExp _urlPattern = RegExp(
-    r'(https?://[^\s]+)|(www\.[^\s]+)',
+  r'(https?://[^\s]+)|(www\.[^\s]+)|([a-zA-Z0-9][a-zA-Z0-9-]*(\.[a-zA-Z0-9][a-zA-Z0-9-]*)*\.(com|in)(?:/[^\s]*)?\b)',
+  caseSensitive: false,
+);
+
+  // Email regex pattern - detects email addresses
+  static final RegExp _emailPattern = RegExp(
+    r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}',
+    caseSensitive: false,
+  );
+
+  // Combined pattern to detect both URLs and emails
+  static final RegExp _urlOrEmailPattern = RegExp(
+    r'([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})|(https?://[^\s]+)|(www\.[^\s]+)|([a-zA-Z0-9][a-zA-Z0-9-]*(\.[a-zA-Z0-9][a-zA-Z0-9-]*)*\.(com|in)(?:/[^\s]*)?\b)',
     caseSensitive: false,
   );
 
@@ -18,8 +31,11 @@ class WhatsAppTextParser {
 
     for (final segment in segments) {
       // Check if segment contains URLs
-      if (_urlPattern.hasMatch(segment.text)) {
+      /*if (_urlPattern.hasMatch(segment.text)) {
         spans.addAll(_parseUrlsInSegment(segment, baseStyle));
+      }*/
+      if (_urlOrEmailPattern.hasMatch(segment.text)) {
+        spans.addAll(_parseUrlsAndEmailsInSegment(segment, baseStyle));
       } else {
         spans.add(TextSpan(
           text: segment.text,
@@ -71,6 +87,90 @@ class WhatsAppTextParser {
 
     return spans;
   }
+  static List<TextSpan> _parseUrlsAndEmailsInSegment(
+      _TextSegment segment, TextStyle? baseStyle) {
+    final List<TextSpan> spans = [];
+    final String text = segment.text;
+    int lastIndex = 0;
+
+    for (final match in _urlOrEmailPattern.allMatches(text)) {
+      if (match.start > lastIndex) {
+        spans.add(TextSpan(
+          text: text.substring(lastIndex, match.start),
+          style: _getStyleForType(segment.type, baseStyle),
+        ));
+      }
+
+      final matchedText = match.group(0)!;
+      final bool isEmail = _emailPattern.hasMatch(matchedText) &&
+          !matchedText.startsWith('http') &&
+          !matchedText.startsWith('www');
+
+      spans.add(TextSpan(
+        text: matchedText,
+        style: _getStyleForType(segment.type, baseStyle).copyWith(
+          color: Colors.blue,
+          decoration: TextDecoration.underline,
+        ),
+        recognizer: TapGestureRecognizer()
+          ..onTap = () {
+            if (isEmail) {
+              _launchEmail(matchedText);
+            } else {
+              _launchURL(matchedText);
+            }
+          },
+      ));
+
+      lastIndex = match.end;
+    }
+
+    if (lastIndex < text.length) {
+      spans.add(TextSpan(
+        text: text.substring(lastIndex),
+        style: _getStyleForType(segment.type, baseStyle),
+      ));
+    }
+
+    return spans;
+  }
+
+  // Launch email app with pre-filled recipient
+  static Future<void> _launchEmail(String email) async {
+    try {
+      final Uri emailUri = Uri(
+        scheme: 'mailto',
+        path: email,
+      );
+
+      bool launched = false;
+
+      try {
+        launched = await launchUrl(emailUri);
+      } catch (e) {
+        debugPrint('⚠️ mailto launch failed: $e');
+      }
+
+      if (!launched) {
+        // Fallback: open Gmail web
+        final Uri gmailUri = Uri.parse(
+          'https://mail.google.com/mail/?view=cm&to=$email',
+        );
+        try {
+          launched = await launchUrl(gmailUri, mode: LaunchMode.externalApplication);
+        } catch (e) {
+          debugPrint('⚠️ Gmail web fallback failed: $e');
+        }
+      }
+
+      if (!launched) {
+        debugPrint('❌ Could not launch email: $email');
+      }
+    } catch (e) {
+      debugPrint('❌ Error launching email: $e');
+    }
+  }
+
 
   // Launch URL in browser
   static Future<void> _launchURL(String urlString) async {
@@ -82,10 +182,10 @@ class WhatsAppTextParser {
       }
 
       final Uri uri = Uri.parse(url);
-      
+
       // Try to launch with different modes for better compatibility
       bool launched = false;
-      
+
       // First try: platformDefault (most compatible)
       try {
         launched = await launchUrl(
@@ -95,7 +195,7 @@ class WhatsAppTextParser {
       } catch (e) {
         debugPrint('⚠️ platformDefault failed: $e');
       }
-      
+
       // Second try: externalNonBrowserApplication
       if (!launched) {
         try {
@@ -107,7 +207,7 @@ class WhatsAppTextParser {
           debugPrint('⚠️ externalNonBrowserApplication failed: $e');
         }
       }
-      
+
       // Third try: inAppBrowserView (fallback)
       if (!launched) {
         try {
@@ -119,7 +219,7 @@ class WhatsAppTextParser {
           debugPrint('⚠️ inAppBrowserView failed: $e');
         }
       }
-      
+
       if (!launched) {
         debugPrint('❌ Could not launch URL: $url');
       }
