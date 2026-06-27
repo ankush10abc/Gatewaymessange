@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
+import 'package:dio/dio.dart';
 import '../data/hive_chat_data_source.dart';
 import '../models/chat_hive_model.dart';
+import '../services/api_service_simple.dart';
+import '../storage/storage_service.dart';
 import 'image_cache_service.dart';
 
 /// Comprehensive chat list synchronization service
@@ -56,6 +59,59 @@ class ChatListSyncService {
       'id': normalizedKey.substring(separatorIndex + 1),
       'attendance_group': isAttendanceGroup,
     };
+  }
+
+  /// Called from splash via unawaited() — only when user is logged in.
+  /// Fetches /api/users/chat-list and stores into Hive in background so
+  /// HomeScreen reads from cache instantly with correct unread counts.
+  static Future<void> preloadForSplash() async {
+    try {
+      final storage = StorageService();
+      final token = await storage.getToken();
+      final user = await storage.getUser();
+
+      // Only run when authenticated
+      if (token == null || user == null) {
+        debugPrint('⏭️ SplashPreload: not logged in, skipping');
+        return;
+      }
+
+      debugPrint('🚀 SplashPreload: background chat sync for user ${user.id}');
+
+      final instance = ChatListSyncService();
+
+      // Initialize Hive box for this user
+      final hive = HiveChatDataSource();
+      await hive.initialize(userId: user.id);
+
+      // Initialize image cache
+      final imageCache = ImageCacheService();
+      await imageCache.initialize();
+
+      // Set instance fields so syncFromApi works
+      instance._hiveDataSource = hive;
+      instance._imageCacheService = imageCache;
+      instance._currentUserId = user.id;
+      instance._isInitialized = true;
+
+      // Call API
+      final apiService = ApiService(Dio());
+      apiService.setAuthToken(token);
+      final response = await apiService.getChatList();
+      if (response.isEmpty) return;
+
+      final apiChats =
+          response.map((e) => e as Map<String, dynamic>).toList();
+
+      // Sync into Firebase + Hive (same pipeline as HomeScreen)
+      await instance.syncFromApi(apiChats);
+
+      debugPrint(
+          '✅ SplashPreload: ${apiChats.length} chats cached — HomeScreen loads instantly');
+    } catch (e) {
+      // Never crash splash — this is best-effort background work
+      debugPrint('⚠️ SplashPreload error (non-fatal): $e');
+    }
   }
 
   /// Initialize service with user ID

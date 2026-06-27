@@ -58,7 +58,7 @@ class NotificationService {
       importance: Importance.high,
       priority: Priority.high,
       icon: 'ic_notification',
-      largeIcon: DrawableResourceAndroidBitmap('ic_notification_colored'),
+      // largeIcon: DrawableResourceAndroidBitmap('ic_notification_colored'),
     );
     
     const iosDetails = DarwinNotificationDetails();

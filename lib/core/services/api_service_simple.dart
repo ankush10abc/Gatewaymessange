@@ -173,7 +173,8 @@ class ProfilePictureResponse {
 
 // 8896946242
 // 272175
-
+//{sender_image: https://gatewayreports.in/storage/profile_pictures/xExHMYoep5mFm8tcFl1TTnw3tgBFHp3SGwVTdfOf.jpg, group_id: 1,
+// group_name: Attendance Group, message_id: 3614, sender_name: Ashish Adhikari, group_type: attendance_group, type: chat, sender_id: 19}
 //9005147759
 //MSakhtar@008#
 // Future<void> _initializeChat() async {
@@ -451,11 +452,18 @@ class ApiService {
   Future<AuthResponse> login(LoginRequest request) async {
     debugPrint(
         'API Call: POST $baseUrl/api/login - Request:lo ${request.toJson()}');
+    _dio.options.headers['Accept'] = 'application/json';
+    _dio.options.headers['Content-Type'] = 'application/json';
     try {
       final response = await _dio.post(
         '/api/login',
         data: request.toJson(),
+        options: Options(headers: {
+          'Accept':'application/json',
+          'Content-Type':'application/json'
+        })
       );
+
       debugPrint(
           'API Response: POST $baseUrl/api/login - ${response.statusCode}');
       final authResponse = AuthResponse.fromJson(response.data);

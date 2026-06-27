@@ -9,7 +9,7 @@ class SimpleNotificationService {
     if (_initialized) return;
     
     try {
-      const androidSettings = AndroidInitializationSettings('ic_notification');
+      const androidSettings = AndroidInitializationSettings('ic_notification_vector');
       const iosSettings = DarwinInitializationSettings();
       const initSettings = InitializationSettings(
         android: androidSettings,
@@ -38,8 +38,7 @@ class SimpleNotificationService {
         channelDescription: 'Notifications for chat messages',
         importance: Importance.high,
         priority: Priority.high,
-        icon: 'ic_notification',
-        largeIcon: DrawableResourceAndroidBitmap('ic_notification_colored'),
+        icon: 'ic_notification_vector',
       );
       
       const iosDetails = DarwinNotificationDetails();

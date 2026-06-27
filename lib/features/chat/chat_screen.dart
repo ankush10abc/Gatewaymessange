@@ -19,7 +19,6 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:scroll_to_index/scroll_to_index.dart';
 
 import '../../core/models/chat_hive_model.dart';
-import '../../core/models/chat_model.dart';
 import '../../core/models/message_model.dart';
 import '../../core/services/active_chat_tracker.dart';
 import '../../core/services/api_service_simple.dart';
@@ -70,6 +69,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   // final ScrollController _scrollController = ScrollController();
   final _scrollController = AutoScrollController();
   int pageCount = 1;
+  bool isFirstTime = true; // Shows 3-sec loader for attendance group on first open
   final TextEditingController _messageController = TextEditingController();
   final FocusNode _focusNode = FocusNode();
   late final ApiService _apiService;
@@ -130,18 +130,26 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           ChatHiveModel.parseAttendanceGroup(widget.attendance_group);
       getUserRole();
 
+      // Start 3-sec loader only for attendance groups
+      if (_isAttendanceGroup == true) {
+        Future.delayed(const Duration(milliseconds: 1500), () {
+          if (mounted) setState(() => isFirstTime = false);
+        });
+      } else {
+        isFirstTime = false; // Non-attendance: no loader needed
+      }
+
       _initializeChat();
       _handleInitialMessage();
-
     });
   }
+
   @override
   void didChangeDependencies() {
     try {
-      if(widget.chatType.toString().toLowerCase() == 'group'){
+      if (widget.chatType.toString().toLowerCase() == 'group') {
         _refreshAfterAttendance();
       }
-
     } catch (e) {
       print(e);
     }
@@ -333,10 +341,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       // Reset unread count via optimizedChatProvider so Hive + UI badge both update
       final attendanceFlag = _isAttendanceGroup == true;
       ref.read(optimizedChatProvider.notifier).markAsRead(
-        widget.chatId,
-        widget.chatType,
-        attendanceFlag,
-      );
+            widget.chatId,
+            widget.chatType,
+            attendanceFlag,
+          );
 
       // Mark messages as read ONLY if online
       if (hasInternet) {
@@ -353,10 +361,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
             // Reset unread count again after Firebase marks messages read
             ref.read(optimizedChatProvider.notifier).markAsRead(
-              widget.chatId,
-              widget.chatType,
-              attendanceFlag,
-            );
+                  widget.chatId,
+                  widget.chatType,
+                  attendanceFlag,
+                );
           }
         });
       }
@@ -375,8 +383,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
   }
 
-
-
   /// Called after attendance is marked — fetch page 1, show instantly, sync in background.
   Future<void> _refreshAfterAttendance() async {
     if (!mounted) return;
@@ -387,8 +393,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
     try {
       final id = int.parse(widget.chatId);
-      final response = await _apiService.getGroupMessages(
-          id, 1, ApiService.messageCount);
+      final response =
+          await _apiService.getGroupMessages(id, 1, ApiService.messageCount);
       final freshMessages = response.data;
       if (freshMessages.isEmpty || !mounted) return;
 
@@ -407,7 +413,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         isAttendanceGroup: true,
       ));
 
-      debugPrint('✅ _refreshAfterAttendance: shown=${freshMessages.length} (sync in bg)');
+      debugPrint(
+          '✅ _refreshAfterAttendance: shown=${freshMessages.length} (sync in bg)');
     } catch (e) {
       debugPrint('❌ _refreshAfterAttendance error: $e');
     }
@@ -444,7 +451,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                 final fbId = m.firebaseId ?? '';
                 final mId = m.msgId ?? '';
                 return !existingIds.contains(fbId) &&
-                    !(mId.isNotEmpty && mId != '0' && existingIds.contains(mId)) &&
+                    !(mId.isNotEmpty &&
+                        mId != '0' &&
+                        existingIds.contains(mId)) &&
                     !existingIds.contains(m.id);
               }).toList();
               _messages.addAll(deduped);
@@ -500,24 +509,29 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                 if (m.id.isNotEmpty) m.id,
               ],
             };
-            final deduped = apiMessages.where((m) =>
-                !existingIds.contains(m.firebaseId ?? '') &&
-                !existingIds.contains(m.msgId ?? '') &&
-                !existingIds.contains(m.id)).toList();
+            final deduped = apiMessages
+                .where((m) =>
+                    !existingIds.contains(m.firebaseId ?? '') &&
+                    !existingIds.contains(m.msgId ?? '') &&
+                    !existingIds.contains(m.id))
+                .toList();
             _messages.addAll(deduped);
             _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
             pageCount = nextPage;
             _loadedBatchCount++;
             _isLoadingOldMessages = false;
           });
-          debugPrint('✅ _syncOldMessages page=$nextPage loaded=${apiMessages.length}');
+          debugPrint(
+              '✅ _syncOldMessages page=$nextPage loaded=${apiMessages.length}');
         }
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isLoadingOldMessages = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to load old messages: Check Internet Connection')),
+          const SnackBar(
+              content: Text(
+                  'Failed to load old messages: Check Internet Connection')),
         );
       }
     }
@@ -630,7 +644,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           _isLoadingPermissions = false; // ✅ ALWAYS hide loader, even offline
           // Initialize batch count based on initial cached messages
           _loadedBatchCount = (cachedMessages.length / 25).ceil();
-          debugPrint('📦 Initial batches from cache: $_loadedBatchCount (${cachedMessages.length} messages)');
+          debugPrint(
+              '📦 Initial batches from cache: $_loadedBatchCount (${cachedMessages.length} messages)');
         });
       }
 
@@ -798,9 +813,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       List<Message> messages = [];
 
       if (widget.chatType == 'group') {
-        pageCount =_loadedBatchCount;
-        debugPrint('API Call: GET Group _loadConversationMetadataFromApi $pageCount');
-        final response = await _apiService.getGroupMessages(id, pageCount, limit);
+        pageCount = _loadedBatchCount;
+        debugPrint(
+            'API Call: GET Group _loadConversationMetadataFromApi $pageCount');
+        final response =
+            await _apiService.getGroupMessages(id, pageCount, limit);
         userData = Map<String, dynamic>.from(response.user);
         messages = response.data;
       } else {
@@ -903,7 +920,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
               // Match by timestamp + sender (for messages sent in last 10 seconds)
               if (existing.senderId == msg.senderId &&
                   existing.text == msg.text &&
-                  existing.timestamp.difference(msg.timestamp).abs().inSeconds < 10) {
+                  existing.timestamp.difference(msg.timestamp).abs().inSeconds <
+                      10) {
                 return true;
               }
 
@@ -911,7 +929,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             });
 
             if (isDuplicate) {
-              debugPrint('⏭️ Skipping duplicate message from Firebase: $firebaseId');
+              debugPrint(
+                  '⏭️ Skipping duplicate message from Firebase: $firebaseId');
               return false;
             }
 
@@ -924,7 +943,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           }
 
           final previousLength = _messages.length;
-          debugPrint('🟡 [FIREBASE] Before merge: ${_messages.length} messages, adding ${filteredMessages.length} new');
+          debugPrint(
+              '🟡 [FIREBASE] Before merge: ${_messages.length} messages, adding ${filteredMessages.length} new');
 
           setState(() {
             // Merge messages based on chat type
@@ -936,7 +956,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             }
           });
 
-          debugPrint('🟢 [FIREBASE] After merge: ${_messages.length} messages (was $previousLength)');
+          debugPrint(
+              '🟢 [FIREBASE] After merge: ${_messages.length} messages (was $previousLength)');
           // Handle new incoming message
           if (_messages.length > previousLength &&
               filteredMessages.isNotEmpty) {
@@ -1288,7 +1309,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     }
 
     final results = _messages.where((msg) {
-      return msg.text.toLowerCase().contains(_searchQuery.toLowerCase()) || msg.senderName != null && msg.senderName!.toLowerCase().contains(_searchQuery.toLowerCase());
+      return msg.text.toLowerCase().contains(_searchQuery.toLowerCase()) ||
+          msg.senderName != null &&
+              msg.senderName!
+                  .toLowerCase()
+                  .contains(_searchQuery.toLowerCase());
     }).toList();
 
     setState(() {
@@ -1400,10 +1425,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     String? fileUrl,
     String? fileName,
     int? fileSize,
-  }
-  ) async
-  {
-    print("neewnwnwnwaaaa ${text}");
+  }) async {
+    print("neewnwnwnwaaaa $text");
     if (_currentUserId == null) return;
 
     final messageText = text ?? fileName ?? '';
@@ -1418,16 +1441,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     String? replyToMessageId;
     if (_replyToMessage != null) {
       // Prefer msgId (server ID), fallback to id if it's not a temp ID
-      if (_replyToMessage!.msgId != null && _replyToMessage!.msgId!.isNotEmpty) {
+      if (_replyToMessage!.msgId != null &&
+          _replyToMessage!.msgId!.isNotEmpty) {
         replyToMessageId = _replyToMessage!.msgId;
-      } else if (_replyToMessage!.id.isNotEmpty && !_replyToMessage!.id.startsWith('temp_')) {
+      } else if (_replyToMessage!.id.isNotEmpty &&
+          !_replyToMessage!.id.startsWith('temp_')) {
         replyToMessageId = _replyToMessage!.id;
       } else {
         // Replying to a message that hasn't been sent yet - wait for it to send
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Please wait for the previous message to send before replying'),
+              content: Text(
+                  'Please wait for the previous message to send before replying'),
               duration: Duration(seconds: 2),
             ),
           );
@@ -1458,7 +1484,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       setState(() {
         _messages.insert(0, message);
         _replyToMessage = null;
-        debugPrint('🟢 [SEND] Step 1: Added temp message. Total messages: ${_messages.length}');
+        debugPrint(
+            '🟢 [SEND] Step 1: Added temp message. Total messages: ${_messages.length}');
       });
     }
 
@@ -1495,15 +1522,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       // Update UI: remove temp message and add real message (single setState)
       if (mounted) {
         setState(() {
-          debugPrint('🟡 [SEND] Step 2: Before merge. Messages count: ${_messages.length}');
-          debugPrint('🟡 [SEND] Temp ID: $tempId, Real ID: ${sentMessage.id}, Firebase ID: ${sentMessage.firebaseId}');
+          debugPrint(
+              '🟡 [SEND] Step 2: Before merge. Messages count: ${_messages.length}');
+          debugPrint(
+              '🟡 [SEND] Temp ID: $tempId, Real ID: ${sentMessage.id}, Firebase ID: ${sentMessage.firebaseId}');
 
           _messages = _mergeMessages(
             _messages.where((item) => item.id != tempId).toList(),
             [sentMessage],
           );
 
-          debugPrint('🟢 [SEND] Step 2: After merge. Messages count: ${_messages.length}');
+          debugPrint(
+              '🟢 [SEND] Step 2: After merge. Messages count: ${_messages.length}');
         });
       }
 
@@ -1878,6 +1908,22 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       );
       return;
     }
+    // Check internet before sending
+    final hasInternet =
+    await InternetChecker.hasInternet();
+    debugPrint("hasInternet Role $hasInternet");
+    if (!hasInternet) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'No internet connection. Please check your connection.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+      return;
+    }
 
     final granted = await _requestCameraPermission();
     if (!granted) return;
@@ -1897,6 +1943,22 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             content: Text(
                 'You do not have permission to send attachments in this chat')),
       );
+      return;
+    }
+    // Check internet before sending
+    final hasInternet =
+    await InternetChecker.hasInternet();
+    debugPrint("hasInternet Role $hasInternet");
+    if (!hasInternet) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'No internet connection. Please check your connection.'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
       return;
     }
 
@@ -2539,6 +2601,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                 Expanded(
                   child: Stack(
                     children: [
+                      // Show 3-sec loader for attendance group on first open
+                      if (_isAttendanceGroup == true && isFirstTime)
+                        const Center(child: CircularProgressIndicator())
+                      else
                       ListView.builder(
                         scrollCacheExtent: const ScrollCacheExtent.pixels(500),
                         controller: _scrollController,
@@ -2637,8 +2703,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                           if (result == true && mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
-                                  content:
-                                      Text('Attendance marked successfully. Please wait while the chat is loading')),
+                                  content: Text(
+                                      'Attendance marked successfully. Please wait while the chat is loading')),
                             );
                             // Reset page and refresh attendance data
                             await _refreshAfterAttendance();
@@ -2670,13 +2736,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                           controller: _messageController,
                           onSendMessage: (text) async {
                             // Check internet before sending
-                            final hasInternet = await InternetChecker.hasInternet();
+                            final hasInternet =
+                                await InternetChecker.hasInternet();
                             debugPrint("hasInternet Role $hasInternet");
                             if (!hasInternet) {
                               if (mounted) {
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
-                                    content: Text('No internet connection. Please check your connection.'),
+                                    content: Text(
+                                        'No internet connection. Please check your connection.'),
                                     duration: Duration(seconds: 2),
                                   ),
                                 );
@@ -3600,7 +3668,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         // Parse composite key "type::id" set by ForwardMessageDialog
         final parts = compositeKey.split('::');
         final chatType = parts.length == 2 ? parts[0] : widget.chatType;
-        final chatId   = parts.length == 2 ? parts[1] : compositeKey;
+        final chatId = parts.length == 2 ? parts[1] : compositeKey;
 
         debugPrint('📤 Forwarding to chatType=$chatType chatId=$chatId');
 
@@ -3744,23 +3812,24 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       return 'typing...';
     }
   }
-String _formatTime(DateTime timestamp) {
-  final now = DateTime.now();
-  final difference = now.difference(timestamp);
 
-  final hour = timestamp.hour % 12 == 0 ? 12 : timestamp.hour % 12;
-  final minute = timestamp.minute.toString().padLeft(2, '0');
-  final period = timestamp.hour >= 12 ? 'PM' : 'AM';
-  final time = '$hour:$minute $period';
+  String _formatTime(DateTime timestamp) {
+    final now = DateTime.now();
+    final difference = now.difference(timestamp);
 
-  if (difference.inDays == 0) {
-    return time;
-  } else if (difference.inDays == 1) {
-    return 'Yesterday $time';
-  } else {
-    return '${timestamp.day}/${timestamp.month}/${timestamp.year} $time';
+    final hour = timestamp.hour % 12 == 0 ? 12 : timestamp.hour % 12;
+    final minute = timestamp.minute.toString().padLeft(2, '0');
+    final period = timestamp.hour >= 12 ? 'PM' : 'AM';
+    final time = '$hour:$minute $period';
+
+    if (difference.inDays == 0) {
+      return time;
+    } else if (difference.inDays == 1) {
+      return 'Yesterday $time';
+    } else {
+      return '${timestamp.day}/${timestamp.month}/${timestamp.year} $time';
+    }
   }
-}
 
   // String _formatTime(DateTime timestamp) {
   //   final now = DateTime.now();

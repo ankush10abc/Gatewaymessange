@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 
 class WarningSlider extends StatefulWidget {
   const WarningSlider({super.key});
@@ -9,160 +10,147 @@ class WarningSlider extends StatefulWidget {
 
 class _WarningSliderState extends State<WarningSlider>
     with SingleTickerProviderStateMixin {
-  late AnimationController _animationController;
-  // Nullable — initialized only after first frame when layout is known
-  Animation<Offset>? _slideAnimation;
+  late final Ticker _ticker;
+
+  // True pixel-per-second speed — identical on every device/refresh-rate
+  static const double _pixelsPerSecond = 50.0;
+
+  final String _englishText =
+      'All messages sent on the phone are for parents only. '
+      'Please do not give mobile phones to children. '
+      'The school does not assign any work to students via phone.';
+
+  final String _hindiText =
+      'फोन पर भेजे जाने वाले सभी संदेश केवल अभिभावकों के लिए हैं। '
+      'कृपया बच्चों को मोबाइल फोन न दें। '
+      'स्कूल द्वारा फोन पर बच्चों को कोई काम नहीं दिया जाता है।';
+
+  // Current horizontal offset in pixels (starts at screenWidth, moves left)
+  double _offsetX = 0;
+
+  // Width of the text+icon row measured after first layout
+  double _contentWidth = 0;
+  double _screenWidth = 0;
+
   bool _isEnglish = true;
+  bool _layoutReady = false;
+
+  // Wall-clock time of the previous ticker tick
+  Duration? _lastElapsed;
+
   final GlobalKey _textKey = GlobalKey();
-
-  // Target scroll speed in logical pixels per second (device-independent).
-  // AnimationController duration is physics-based, not frame-rate-based,
-  // so this produces identical perceived speed on 60Hz, 90Hz, and 120Hz devices.
-  static const double _pixelsPerSecond = 55.0;
-  // Hard floor: even on tiny screens the animation never finishes in <12s
-  static const int _minDurationMs = 12000;
-
-  final String englishText =
-      "All messages sent on the phone are for parents only. Please do not give mobile phones to children. The school does not assign any work to students via phone.";
-  final String hindiText =
-      'फोन पर भेजे जाने वाले सभी संदेश केवल अभिभावकों के लिए हैं। कृपया बच्चों को मोबाइल फोन न दें। स्कूल द्वारा फोन पर बच्चों को कोई काम नहीं दिया जाता है।';
 
   @override
   void initState() {
     super.initState();
-    _animationController = AnimationController(
-      duration: const Duration(seconds: 20), // overridden in _startAnimation
-      vsync: this,
-    );
+    _ticker = createTicker(_onTick);
 
-    // Wait for first frame so layout + RenderBox are available
+    // Measure content size after first frame, then start
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _startAnimation();
+      _measureAndStart();
     });
   }
 
-  void _startAnimation() {
+  void _measureAndStart() {
     if (!mounted) return;
 
-    final screenWidth = MediaQuery.of(context).size.width;
+    final box = _textKey.currentContext?.findRenderObject() as RenderBox?;
+    final mediaWidth = MediaQuery.of(context).size.width;
 
-    // Measure actual rendered text width via RenderBox
-    double contentWidth = screenWidth * 2;
-    final renderBox = _textKey.currentContext?.findRenderObject() as RenderBox?;
-    if (renderBox != null) {
-      contentWidth = renderBox.size.width + 16 + 8 + 16 + 50; // padding + icon + spacer
-    }
+    _screenWidth = mediaWidth;
+    // content = icon(16) + gap(8) + text + trailing gap(50) + horizontal padding(32)
+    _contentWidth = (box?.size.width ?? mediaWidth * 2) + 16 + 8 + 50 + 32;
 
-    // Total travel = screen width (start off-right) + content width (end off-left)
-    final totalPixels = screenWidth + contentWidth;
-    // Duration derived from physics (px ÷ px/s = seconds), NOT from frame rate.
-    // This makes speed identical on all refresh-rate devices (60/90/120Hz).
-    final durationMs =
-        ((totalPixels / _pixelsPerSecond) * 1000).round().clamp(_minDurationMs, 40000);
+    // Start fully off-screen to the right
+    _offsetX = _screenWidth;
+    _layoutReady = true;
+    _lastElapsed = null;
 
-    _animationController.duration = Duration(milliseconds: durationMs);
+    if (!_ticker.isActive) _ticker.start();
+  }
 
-    // Build animation and assign atomically before starting
-    final animation = Tween<Offset>(
-      begin: Offset(screenWidth / contentWidth, 0.0),
-      end: const Offset(-1.0, 0.0),
-    ).animate(CurvedAnimation(
-      parent: _animationController,
-      curve: Curves.linear,
-    ));
+  void _onTick(Duration elapsed) {
+    if (!mounted) return;
 
-    // setState ensures AnimatedBuilder sees the non-null animation
-    if (mounted) {
-      setState(() {
-        _slideAnimation = animation;
-      });
-    }
+    final last = _lastElapsed;
+    _lastElapsed = elapsed;
 
-    _animationController.forward(from: 0).then((_) {
-      if (mounted) {
-        setState(() {
-          _isEnglish = !_isEnglish;
-          _slideAnimation = null; // Reset while next animation is prepared
+    if (last == null) return; // skip first tick — no delta yet
+
+    // Delta in seconds using real wall-clock time → speed is device-independent
+    final deltaSeconds = (elapsed - last).inMicroseconds / 1e6;
+    final deltaPixels = _pixelsPerSecond * deltaSeconds;
+
+    setState(() {
+      _offsetX -= deltaPixels;
+
+      // When text has fully scrolled off-screen to the left, reset & switch language
+      if (_offsetX < -_contentWidth) {
+        _isEnglish = !_isEnglish;
+        _offsetX = _screenWidth; // restart from right edge
+        _lastElapsed = null;    // skip next delta to avoid a jump
+
+        // Re-measure after language switch (text length differs)
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          final box =
+              _textKey.currentContext?.findRenderObject() as RenderBox?;
+          if (box != null) {
+            _contentWidth = box.size.width + 16 + 8 + 50 + 32;
+          }
         });
-        WidgetsBinding.instance.addPostFrameCallback((_) => _startAnimation());
       }
     });
   }
 
   @override
   void dispose() {
-    _animationController.dispose();
+    _ticker.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // Capture screen width on every build (handles rotation)
+    _screenWidth = MediaQuery.of(context).size.width;
+
     return Container(
       height: 40,
-      color: Colors.orange[100],
-      child: ClipRect(
-        child: OverflowBox(
-          maxWidth: double.infinity,
-          // Guard: show static text until animation is initialized
-          child: _slideAnimation == null
-              ? Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.warning_amber_rounded,
-                          color: Colors.orange[800], size: 16),
-                      const SizedBox(width: 8),
-                      Text(
-                        _isEnglish ? englishText : hindiText,
-                        key: _textKey,
-                        style: TextStyle(
-                          color: Colors.orange[800],
-                          fontSize: 12,
-                          fontWeight: FontWeight.w500,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.visible,
-                      ),
-                      const SizedBox(width: 50),
-                    ],
-                  ),
-                )
-              : AnimatedBuilder(
-                  animation: _animationController,
-                  builder: (context, child) => SlideTransition(
-                    position: _slideAnimation!,
-                    child: child,
-                  ),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.warning_amber_rounded,
-                          color: Colors.orange[800],
-                          size: 16,
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          _isEnglish ? englishText : hindiText,
-                          key: _textKey,
-                          style: TextStyle(
-                            color: Colors.orange[800],
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.visible,
-                        ),
-                        const SizedBox(width: 50),
-                      ],
-                    ),
-                  ),
-                ),
+      clipBehavior: Clip.hardEdge,
+      decoration: BoxDecoration(color: Colors.orange[100]),
+      child: _layoutReady
+          ? Transform.translate(
+              offset: Offset(_offsetX, 0),
+              child: _buildContent(),
+            )
+          // First frame: render off-screen so we can measure, but invisible
+          : Opacity(
+              opacity: 0,
+              child: _buildContent(),
+            ),
+    );
+  }
+
+  Widget _buildContent() {
+    return Row(
+      key: _textKey,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const SizedBox(width: 16),
+        Icon(Icons.warning_amber_rounded, color: Colors.orange[800], size: 16),
+        const SizedBox(width: 8),
+        Text(
+          _isEnglish ? _englishText : _hindiText,
+          style: TextStyle(
+            color: Colors.orange[800],
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
+          ),
+          maxLines: 1,
+          softWrap: false,
         ),
-      ),
+        const SizedBox(width: 50),
+      ],
     );
   }
 }

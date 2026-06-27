@@ -562,7 +562,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               // chat.lastMessage ?? 'Tap to start chatting',
                'Tap to start chatting',
               style: TextStyle(
-                color: chat.unreadCount > 0 ? Colors.black87 : Colors.grey[600],
+                color: chat.unreadCount > 0 ? Colors.grey : Colors.grey[600],
                 fontWeight:
                     chat.unreadCount > 0 ? FontWeight.w500 : FontWeight.normal,
                 fontStyle: chat.lastMessage == null
