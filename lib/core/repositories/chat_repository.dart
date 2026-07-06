@@ -35,6 +35,11 @@ class ChatRepository {
     debugPrint('🔄 Sync service initialized for user: $userId');
   }
 
+  /// Register the provider callback so Hive-write paths immediately push state
+  void setOnChatsUpdated(void Function(List<ChatHiveModel>) callback) {
+    _syncService.setOnChatsUpdated(callback);
+  }
+
   List<ChatHiveModel> getCachedChats() {
     return _syncService.getSortedChatList();
   }

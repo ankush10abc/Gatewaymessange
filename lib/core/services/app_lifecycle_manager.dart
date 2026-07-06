@@ -36,7 +36,7 @@ class _AppLifecycleManagerState extends ConsumerState<AppLifecycleManager>
 
     switch (state) {
       case AppLifecycleState.resumed:
-        _validateTokenOnResume();
+        // _validateTokenOnResume();
         break;
       case AppLifecycleState.paused:
         _onAppPaused();

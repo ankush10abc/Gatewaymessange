@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:fluttertoast/fluttertoast.dart';
 
 import '../models/chat_list_model.dart';
 import '../models/message_model.dart';
@@ -21,7 +22,7 @@ class LoginRequest {
   Map<String, dynamic> toJson() => {
         'mobile': mobile,
         'password': password,
-        if (fcmToken != null) 'fcm_token': fcmToken,
+         'fcm_token': fcmToken,
       };
 }
 
@@ -173,6 +174,12 @@ class ProfilePictureResponse {
 
 // 8896946242
 // 272175
+
+
+
+// 8175986478    namrata
+// namrata2010
+
 //{sender_image: https://gatewayreports.in/storage/profile_pictures/xExHMYoep5mFm8tcFl1TTnw3tgBFHp3SGwVTdfOf.jpg, group_id: 1,
 // group_name: Attendance Group, message_id: 3614, sender_name: Ashish Adhikari, group_type: attendance_group, type: chat, sender_id: 19}
 //9005147759
@@ -311,6 +318,12 @@ class ApiService {
         if (options.data is! FormData) {
           options.headers['Content-Type'] = 'application/json';
         }
+        // Remove content-length — Dio computes it automatically from the body
+        // but some servers reject requests when it appears alongside
+        // Transfer-Encoding or chunked payloads. Strip it so only
+        // Accept, Content-Type, and Authorization are ever sent.
+        options.headers.remove('content-length');
+        options.headers.remove('Content-Length');
         // debugPrint('API Request Headers: ${options.headers}');
         handler.next(options);
       },
@@ -323,7 +336,7 @@ class ApiService {
         debugPrint('Method: ${error.requestOptions.method}');
         debugPrint('Status Code: ${error.response?.statusCode}');
         debugPrint('Headers: ${error.requestOptions.headers}');
-        
+
         if (error.requestOptions.data != null) {
           if (error.requestOptions.data is FormData) {
             debugPrint('Request Data: FormData (${(error.requestOptions.data as FormData).fields.length} fields)');
@@ -331,20 +344,15 @@ class ApiService {
             debugPrint('Request Data: ${error.requestOptions.data}');
           }
         }
-        
+
         if (error.response?.data != null) {
           debugPrint('Response: ${error.response?.data}');
         }
-        
+
         debugPrint('Error Type: ${error.type}');
         debugPrint('Error Message: ${error.message}');
         debugPrint('========================================\n');
-        
-        // Handle 401/403 errors
-        if (error.response?.statusCode == 401 ||
-            error.response?.statusCode == 403) {
-          await _handle401Error();
-        }
+
         handler.next(error);
       },
     ));
@@ -385,7 +393,7 @@ class ApiService {
     debugPrint('Method: ${e.requestOptions.method}');
     debugPrint('Status Code: ${e.response?.statusCode}');
     debugPrint('Headers: ${e.requestOptions.headers}');
-    
+
     if (e.requestOptions.data != null) {
       if (e.requestOptions.data is FormData) {
         debugPrint('Request Data: FormData (${(e.requestOptions.data as FormData).fields.length} fields)');
@@ -393,13 +401,17 @@ class ApiService {
         debugPrint('Request Data: ${e.requestOptions.data}');
       }
     }
-    
+
     if (e.response?.data != null) {
       debugPrint('Response: ${e.response?.data}');
     }
-    
+
     debugPrint('Error Type: ${e.type}');
     debugPrint('Error Message: ${e.message}');
+    if(e.message.toString().contains('Failed host lookup') || e.message.toString().contains('timeout')){
+
+      Fluttertoast.showToast(msg: "Check your internet");
+    }
     debugPrint('========================================\n');
   }
 
@@ -539,10 +551,18 @@ class ApiService {
   // Users & Chat APIs
   Future<List<dynamic>> getChatList() async {
     debugPrint('API Call: GET $baseUrl/api/users/chat-list');
-    final response = await _dio.get('/api/users/chat-list');
-    debugPrint(
-        'API Response: GET $baseUrl/api/users/chat-list - ${response.data}');
-    return response.data as List<dynamic>;
+    try {
+      final response = await _dio.get('/api/users/chat-list');
+      debugPrint(
+          'API Response: GET $baseUrl/api/users/chat-list - ${response.data}');
+      return response.data as List<dynamic>;
+    } on DioException catch (e) {
+      // Only logout when chat-list returns 401/403 — not for any other API
+      if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
+        await _handle401Error();
+      }
+      rethrow;
+    }
   }
 
   Future<List<User>> searchUsers(String query,{int page = 1}) async {
@@ -551,7 +571,7 @@ class ApiService {
         await _dio.get('/api/users/search', queryParameters: {'query': query,'page': page});
     debugPrint(
         'API Response: GET $baseUrl/api/users/search?page=$page - ${response.data}');
-    
+
     // Handle response structure: {data: [...]} or [...]
     final List<dynamic> userList;
     if (response.data is Map && response.data['data'] != null) {
@@ -561,7 +581,7 @@ class ApiService {
     } else {
       return [];
     }
-    
+
     return userList.map((item) {
       debugPrint("Ankush catch ${User.fromJson(item)}");
       return User.fromJson(item);
@@ -633,7 +653,11 @@ class ApiService {
     return Message.fromJson(response.data);
   }
 
-  Future<FileUploadResponse> uploadFile(File file, String messageType) async {
+  Future<FileUploadResponse> uploadFile(
+    File file,
+    String messageType, {
+    void Function(int sent, int total)? onProgress,
+  }) async {
     final formData = FormData.fromMap({
       'file': await MultipartFile.fromFile(file.path),
       'message_type': messageType,
@@ -644,11 +668,11 @@ class ApiService {
     final response = await _dio.post(
       '/api/message/upload',
       data: formData,
+      onSendProgress: onProgress,
       options: Options(
         headers: {
           'Accept': 'application/json',
           'Content-Type': 'application/json',
-          // Content-Type will be set automatically by Dio for FormData (multipart/form-data)
         },
       ),
     );

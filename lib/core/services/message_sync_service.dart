@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:hive/hive.dart';
@@ -237,8 +238,11 @@ class MessageSyncService {
     if (rawUrl.startsWith('http')) return rawUrl;
     if (rawUrl.startsWith('/storage/')) return '${ApiService.baseUrl}$rawUrl';
     if (rawUrl.startsWith('storage/')) return '${ApiService.baseUrl}/$rawUrl';
-    if (rawUrl.startsWith('/')) return null;
-
+    // Already a local file path — no download needed. Check after /storage
+    // because API media paths can also begin with that prefix.
+    if (rawUrl.startsWith('/') && File(rawUrl).existsSync()) return null;
+    if (rawUrl.startsWith('/')) return '${ApiService.baseUrl}$rawUrl';
+    // Relative path like "uploads/images/img.jpg"
     return '${ApiService.baseUrl}/storage/$rawUrl';
   }
 
@@ -304,22 +308,25 @@ class MessageSyncService {
     return messages;
   }
 
-  /// Deep convert Map<dynamic, dynamic> to Map<String, dynamic>
+  /// Deep convert any Map to Map<String, dynamic>, recursively.
+  /// Ensures all nested maps (including 'status') have String keys and
+  /// String values so Message.fromJson and parseStatus never get type errors.
   Map<String, dynamic> _deepConvertMap(dynamic input) {
     if (input is Map) {
-      return input.map((key, value) {
+      return Map<String, dynamic>.fromEntries(input.entries.map((e) {
+        final key = e.key.toString();
+        final value = e.value;
         if (value is Map) {
-          return MapEntry(key.toString(), _deepConvertMap(value));
+          return MapEntry(key, _deepConvertMap(value));
         } else if (value is List) {
           return MapEntry(
-              key.toString(),
-              value.map((item) {
-                if (item is Map) return _deepConvertMap(item);
-                return item;
-              }).toList());
+            key,
+            value.map((item) => item is Map ? _deepConvertMap(item) : item).toList(),
+          );
         }
-        return MapEntry(key.toString(), value);
-      });
+        // Ensure all scalar values are stored as their natural type
+        return MapEntry(key, value);
+      }));
     }
     return {};
   }
@@ -361,7 +368,8 @@ class MessageSyncService {
     // --- Step 1: Read existing Firebase nodes to build dedup sets ---
     // We read ALL fields per node so we can match by msgId stored inside
     final existingFbKeys = <String>{};
-    final existingFbMsgIds = <String>{}; // values of msgId/id stored inside nodes
+    final existingFbMsgIds =
+        <String>{}; // values of msgId/id stored inside nodes
     try {
       final snap = await FirebaseRealtimeService.database
           .ref('chats/$firebaseChatId/messages')
@@ -378,7 +386,8 @@ class MessageSyncService {
             // Also collect any id values stored inside full message nodes
             for (final f in ['msgId', 'msg_id', 'id', 'firebaseId']) {
               final v = val[f]?.toString();
-              if (v != null && v.isNotEmpty && v != '0') existingFbMsgIds.add(v);
+              if (v != null && v.isNotEmpty && v != '0')
+                existingFbMsgIds.add(v);
             }
           }
         }
@@ -417,8 +426,9 @@ class MessageSyncService {
 
     for (final msg in messages) {
       final msgId = msg.msgId?.trim();
-      final resolvedId =
-          (msgId != null && msgId.isNotEmpty && msgId != '0') ? msgId : msg.id.trim();
+      final resolvedId = (msgId != null && msgId.isNotEmpty && msgId != '0')
+          ? msgId
+          : msg.id.trim();
 
       if (resolvedId.isEmpty) continue;
 
@@ -508,7 +518,8 @@ class MessageSyncService {
     if (msg.fileUrl?.isNotEmpty == true) data['file_url'] = msg.fileUrl!;
     if (msg.file_path?.isNotEmpty == true) data['file_path'] = msg.file_path!;
     if (msg.fileName?.isNotEmpty == true) data['file_name'] = msg.fileName!;
-    if (msg.fileSize != null && msg.fileSize! > 0) data['file_size'] = msg.fileSize!;
+    if (msg.fileSize != null && msg.fileSize! > 0)
+      data['file_size'] = msg.fileSize!;
     if (msg.replyToId?.isNotEmpty == true) data['reply_to_id'] = msg.replyToId!;
     if (msg.profile_picture_url != null) {
       data['profile_picture_url'] = msg.profile_picture_url.toString();
@@ -579,7 +590,8 @@ class MessageSyncService {
       // Try to migrate Hive data to SQLite for future instant loads (best effort)
       if (messages.isNotEmpty) {
         try {
-          unawaited(_dbService.saveMessages(messages, chatId, chatType));
+          // Use _saveToDatabaseAsync so images are cached before SQLite write
+          unawaited(_saveToDatabaseAsync(messages: messages, chatId: chatId, chatType: chatType));
           debugPrint(
               '$TAG 🔄 Migrating ${messages.length} Hive messages to SQLite');
         } catch (e) {
@@ -1402,6 +1414,13 @@ class MessageSyncService {
     debugPrint('$TAG 🛑 Stopped background sync for $cacheKey');
   }
 
+  /// Returns all message IDs already marked as read in SQLite for this chat.
+  /// Used to pre-seed the in-memory read-tracking set on app restart so
+  /// already-read messages are never re-processed as unread.
+  Future<Set<String>> getReadMessageIds(String chatId, String chatType) async {
+    return _dbService.getReadMessageIds(chatId, chatType);
+  }
+
   /// Update message in cache (e.g., status update)
   Future<void> updateMessageInCache(String chatId, String chatType,
       String messageKey, Map<String, dynamic> updates,
@@ -1415,13 +1434,81 @@ class MessageSyncService {
           isAttendanceGroup: isAttendanceGroup);
       final box = await _getMessageBox(cacheKey);
 
-      final messageData = box.get(messageKey);
-      if (messageData != null) {
-        final msgMap = Map<String, dynamic>.from(messageData);
-        msgMap.addAll(updates);
-        await box.put(messageKey, msgMap);
-        debugPrint('$TAG 🔄 Updated message $messageKey in cache');
-        debugPrint('$TAG 🔄 Loadedmessages $messageKey in cache');
+      // Try all possible storage keys: direct key, msgid_ prefix, api_ prefix
+      // Messages from API are stored under 'msgid_X' or 'api_X', not firebaseId.
+      final candidateKeys = [
+        messageKey,
+        'msgid_$messageKey',
+        'api_$messageKey',
+      ];
+
+      String? resolvedKey;
+      Map? rawData;
+      for (final k in candidateKeys) {
+        final data = box.get(k);
+        if (data != null) {
+          resolvedKey = k;
+          rawData = data;
+          break;
+        }
+      }
+
+      // Also scan box for a message whose firebaseId or msgId matches
+      if (resolvedKey == null) {
+        for (final entry in box.toMap().entries) {
+          final val = entry.value;
+          if (val is! Map) continue;
+          final storedFbId = val['firebaseId']?.toString();
+          final storedMsgId = val['msgId']?.toString() ?? val['msg_id']?.toString();
+          if (storedFbId == messageKey || storedMsgId == messageKey) {
+            resolvedKey = entry.key.toString();
+            rawData = val;
+            break;
+          }
+        }
+      }
+
+      if (resolvedKey != null && rawData != null) {
+        // Deep-convert to avoid Map<dynamic,dynamic> corruption on re-store
+        final msgMap = _deepConvertMap(rawData);
+        // Merge status with priority — never downgrade read → delivered → sent
+        if (updates.containsKey('status') && updates['status'] is Map) {
+          final existingStatus = parseStatus(msgMap['status']);
+          final incomingStatus = parseStatus(updates['status']);
+          const priority = {'sending': -1, 'sent': 0, 'delivered': 1, 'read': 2};
+          final merged = Map<String, String>.from(existingStatus);
+          for (final entry in incomingStatus.entries) {
+            final current = merged[entry.key];
+            final currentP = priority[current] ?? 0;
+            final incomingP = priority[entry.value] ?? 0;
+            if (current == null || incomingP > currentP) {
+              merged[entry.key] = entry.value;
+            }
+          }
+          msgMap['status'] = merged;
+          // Apply remaining updates (non-status fields)
+          for (final e in updates.entries) {
+            if (e.key != 'status') msgMap[e.key] = e.value;
+          }
+        } else {
+          msgMap.addAll(updates);
+        }
+        await box.put(resolvedKey, msgMap);
+        debugPrint('$TAG 🔄 Updated message $resolvedKey (looked up by $messageKey) in cache');
+      } else {
+        debugPrint('$TAG ⚠️ updateMessageInCache: key $messageKey not found in box $cacheKey');
+      }
+
+      // Also update SQLite per-user status so double tick persists across restarts
+      final statusUpdate = updates['status'];
+      if (statusUpdate is Map && messageKey.isNotEmpty) {
+        for (final entry in statusUpdate.entries) {
+          final userId = entry.key.toString();
+          final userStatus = entry.value.toString();
+          if (userId != 'default') {
+            unawaited(_dbService.updateMessageUserStatus(messageKey, userId, userStatus));
+          }
+        }
       }
     } catch (e) {
       debugPrint('$TAG ❌ Failed to update message: $e');
@@ -1654,8 +1741,51 @@ Future<void> _saveToDatabaseAsync({
 }) async {
   try {
     final dbService = MessageDatabaseService();
-    await dbService.saveMessages(messages, chatId, chatType);
-    debugPrint('✅ Background: Saved ${messages.length} messages to SQLite');
+    final imageCacheService = ImageCacheService();
+    await imageCacheService.initialize();
+
+    // Cache images and persist local_image_path in metadata before SQLite save
+    final cachedMessages = await Future.wait(messages.map((msg) async {
+      if (msg.type != 'image') return msg;
+
+      // Already has a valid local path — no re-download needed
+      final existing = msg.metadata?['local_image_path']?.toString();
+      if (existing != null && existing.isNotEmpty && File(existing).existsSync()) {
+        return msg;
+      }
+
+      // Resolve remote URL from file_path / fileUrl
+      final rawUrl = (msg.fileUrl?.isNotEmpty == true ? msg.fileUrl : msg.file_path)?.trim();
+      if (rawUrl == null || rawUrl.isEmpty) return msg;
+
+      String imageUrl;
+      if (rawUrl.startsWith('http')) {
+        imageUrl = rawUrl;
+      } else if (rawUrl.startsWith('/storage/') || rawUrl.startsWith('storage/')) {
+        imageUrl = '${ApiService.baseUrl}/${rawUrl.replaceFirst(RegExp(r'^/'), '')}';
+      } else if (rawUrl.startsWith('/') && File(rawUrl).existsSync()) {
+        // Already a local file — store as local_image_path directly
+        final meta = Map<String, dynamic>.from(msg.metadata ?? {});
+        meta['local_image_path'] = rawUrl;
+        return msg.copyWith(metadata: meta);
+      } else if (rawUrl.startsWith('/')) {
+        imageUrl = '${ApiService.baseUrl}$rawUrl';
+      } else {
+        imageUrl = '${ApiService.baseUrl}/storage/$rawUrl';
+      }
+
+      final localPath = await imageCacheService.downloadAndCache(imageUrl);
+      if (localPath != null && localPath != imageUrl) {
+        final meta = Map<String, dynamic>.from(msg.metadata ?? {});
+        meta['local_image_path'] = localPath;
+        meta['remote_image_url'] = imageUrl;
+        return msg.copyWith(metadata: meta);
+      }
+      return msg;
+    }));
+
+    await dbService.saveMessages(cachedMessages, chatId, chatType);
+    debugPrint('✅ Background: Saved ${cachedMessages.length} messages to SQLite (with image cache)');
   } catch (e) {
     debugPrint('❌ Background SQLite save error: $e');
     // Silently fail - data still in Hive as fallback

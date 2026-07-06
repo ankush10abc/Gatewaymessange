@@ -41,7 +41,8 @@ class _NotificationPreferencesScreenState extends State<NotificationPreferencesS
         );
       }
     } catch (e) {
-      if (mounted) {
+      // Silently handle offline/network errors — preferences saved locally
+      if (mounted && !_isNetworkError(e)) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Failed to save: $e')),
         );
@@ -51,6 +52,20 @@ class _NotificationPreferencesScreenState extends State<NotificationPreferencesS
         setState(() => _isLoading = false);
       }
     }
+  }
+
+  /// Returns true if the error is a network/connectivity issue (offline mode)
+  bool _isNetworkError(Object e) {
+    if (e is DioException) {
+      return e.type == DioExceptionType.connectionError ||
+          e.type == DioExceptionType.connectionTimeout ||
+          e.type == DioExceptionType.sendTimeout ||
+          e.type == DioExceptionType.receiveTimeout;
+    }
+    final msg = e.toString().toLowerCase();
+    return msg.contains('socketexception') ||
+        msg.contains('network') ||
+        msg.contains('connection');
   }
 
   @override

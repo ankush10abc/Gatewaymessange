@@ -110,12 +110,19 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- Location service: starts on login, stops on logout -->
+        <service
+            android:name=".LocationForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:stopWithTask="false" />
+
+        <!-- Telemetry service: starts on login, stops on logout -->
         <service
             android:name=".TelemetryForegroundService"
             android:enabled="true"
             android:exported="false"
-            android:stopWithTask="false"
-            android:foregroundServiceType="location" />
+            android:stopWithTask="false" />
 
         <receiver
             android:name=".TelemetryRestartReceiver"

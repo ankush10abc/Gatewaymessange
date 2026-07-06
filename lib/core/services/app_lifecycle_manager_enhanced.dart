@@ -50,9 +50,9 @@ class AppLifecycleManager extends WidgetsBindingObserver {
 
     } catch (e) {
       // Token invalid, clear storage and logout
-      bool hasInternet =   await InternetChecker.hasInternet();
-      if(hasInternet)
-      await _storage.clearAll();
+      // bool hasInternet =   await InternetChecker.hasInternet();
+      // if(hasInternet)
+      // await _storage.clearAll();
       // Navigate to login screen
       // This should be handled by the auth provider
     }

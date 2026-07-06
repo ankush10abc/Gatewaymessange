@@ -1,12 +1,13 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:dio/dio.dart';
 import '../../app/theme/app_theme.dart';
-import '../../shared/providers/auth_provider.dart';
 import '../../core/models/user_model.dart';
 import '../../core/services/api_service_simple.dart';
 import '../../core/storage/storage_service.dart';
+import '../../core/utils/internet_checker.dart';
+import '../../shared/providers/auth_provider.dart';
 import '../../shared/widgets/profile_image_widget.dart';
 
 class SearchScreen extends ConsumerStatefulWidget {
@@ -63,6 +64,20 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
 
   Future<void> _searchUsers(String query) async {
     // Reset pagination when new search
+
+    final hasInternet = await InternetChecker.hasInternet();
+    if (!hasInternet) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No internet connection'),
+            backgroundColor: Colors.grey,
+          ),
+        );
+      }
+      return; // Stop — don't make API call offline
+    }
+
     _currentPage = 1;
     _hasMoreData = true;
     
@@ -85,13 +100,11 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
         _isLoading = false;
         _hasMoreData = false;
       });
-      debugPrint("Ankush catch $e");
-      if (mounted) {
+      debugPrint("Search error: $e");
+      // Silently handle offline/network errors — show empty state instead of red popup
+      if (mounted && !_isNetworkError(e)) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Search failed: $e', maxLines: 2,),
-            backgroundColor: Colors.red,
-          ),
+          SnackBar(content: Text('Search failed. Please try again.'), backgroundColor: Colors.red),
         );
       }
     }
@@ -119,12 +132,11 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
         _isLoadingMore = false;
         _currentPage--; // Revert page increment on error
       });
-      if (mounted) {
+      debugPrint("Load more error: $e");
+      // Silently handle offline/network errors
+      if (mounted && !_isNetworkError(e)) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to load more: $e', maxLines: 2),
-            backgroundColor: Colors.red,
-          ),
+          SnackBar(content: Text('Failed to load more. Please try again.')),
         );
       }
     }
@@ -228,6 +240,20 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
         ],
       ),
     );
+  }
+
+  /// Returns true if the error is a network/connectivity issue (offline mode)
+  bool _isNetworkError(Object e) {
+    if (e is DioException) {
+      return e.type == DioExceptionType.connectionError ||
+          e.type == DioExceptionType.connectionTimeout ||
+          e.type == DioExceptionType.sendTimeout ||
+          e.type == DioExceptionType.receiveTimeout;
+    }
+    final msg = e.toString().toLowerCase();
+    return msg.contains('socketexception') ||
+        msg.contains('network') ||
+        msg.contains('connection');
   }
 
   String _getRoleDisplayName(String role) {

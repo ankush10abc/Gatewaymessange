@@ -5,6 +5,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
 import '../../core/models/message_model.dart';
 import '../../core/services/api_service_simple.dart';
+import '../../core/services/chat_list_update_service.dart';
 import '../../core/services/firebase_realtime_service.dart';
 import '../../core/services/message_database_service.dart';
 import '../../core/services/time_service.dart';
@@ -211,6 +212,16 @@ class _MarkAttendanceScreenState extends State<MarkAttendanceScreen> {
 
       // Sync the attendance message to Firebase + SQLite immediately
       unawaited(_syncAttendanceMessage(responseData));
+
+      // Update HomeScreen chat list badge (sender side — no unread increment)
+      final content = responseData['content']?.toString() ??
+          responseData['text']?.toString() ?? 'Attendance marked';
+      ChatListUpdateService.updateOnMessageSent(
+        chatId: widget.groupId,
+        chatType: 'group',
+        lastMessage: content,
+        attendanceGroup: true,
+      );
 
       if (mounted) {
         Navigator.pop(context, true);

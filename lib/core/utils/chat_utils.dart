@@ -36,34 +36,34 @@ class ChatUtils {
   }
   
   /// Check if message is read by user
-  static bool isMessageRead(Map<String, String> status, String userId) {
-    return status[userId] == 'read';
-  }
+  // static bool isMessageRead(Map<String, String> status, String userId) {
+  //   return status[userId] == 'read';
+  // }
   
   /// Get message status for display (single tick, double tick, blue tick)
-  static String getMessageStatusDisplay(Map<String, String> status, String senderId, List<String> participants) {
-    if (status.isEmpty) return 'sent';
-    
-    final otherParticipants = participants.where((id) => id != senderId).toList();
-    if (otherParticipants.isEmpty) return 'sent';
-    
-    bool allRead = true;
-    bool anyDelivered = false;
-    
-    for (final userId in otherParticipants) {
-      final userStatus = status[userId] ?? 'sent';
-      if (userStatus == 'read') {
-        continue;
-      } else if (userStatus == 'delivered') {
-        allRead = false;
-        anyDelivered = true;
-      } else {
-        allRead = false;
-      }
-    }
-    
-    if (allRead) return 'read';
-    if (anyDelivered) return 'delivered';
-    return 'sent';
-  }
+  // static String getMessageStatusDisplay(Map<String, String> status, String senderId, List<String> participants) {
+  //   if (status.isEmpty) return 'sent';
+  //
+  //   final otherParticipants = participants.where((id) => id != senderId).toList();
+  //   if (otherParticipants.isEmpty) return 'sent';
+  //
+  //   bool allRead = true;
+  //   bool anyDelivered = false;
+  //
+  //   for (final userId in otherParticipants) {
+  //     final userStatus = status[userId] ?? 'sent';
+  //     if (userStatus == 'read') {
+  //       continue;
+  //     } else if (userStatus == 'delivered') {
+  //       allRead = false;
+  //       anyDelivered = true;
+  //     } else {
+  //       allRead = false;
+  //     }
+  //   }
+  //
+  //   if (allRead) return 'read';
+  //   if (anyDelivered) return 'delivered';
+  //   return 'sent';
+  // }
 }

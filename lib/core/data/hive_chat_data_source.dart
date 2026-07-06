@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:hive/hive.dart';
 import '../models/chat_hive_model.dart';
@@ -24,7 +26,8 @@ class HiveChatDataSource {
 
     // If switching user — close old box first so we never mix data
     if (_userId != null && _userId != targetUserId) {
-      debugPrint('🔄 User switch detected: $_userId → $targetUserId, closing old box');
+      debugPrint(
+          '🔄 User switch detected: $_userId → $targetUserId, closing old box');
       await close();
     }
 
@@ -32,7 +35,8 @@ class HiveChatDataSource {
 
     if (_chatBox == null || !_chatBox!.isOpen) {
       _chatBox = await Hive.openBox<ChatHiveModel>(_chatBoxName(targetUserId));
-      debugPrint('📦 Chat box opened for user $targetUserId: ${_chatBox!.length} chats');
+      debugPrint(
+          '📦 Chat box opened for user $targetUserId: ${_chatBox!.length} chats');
       await _cleanupDuplicates();
     }
 
@@ -76,12 +80,12 @@ class HiveChatDataSource {
   Future<void> _cleanupDuplicates() async {
     final seenChats = <String, String>{}; // chatId_type -> hive_key
     final keysToDelete = <String>[];
-    
+
     for (final key in _chatBox!.keys) {
       final chat = _chatBox!.get(key);
       if (chat != null) {
         final uniqueKey = chat.getUniqueKey();
-        
+
         if (seenChats.containsKey(uniqueKey)) {
           // Duplicate found - delete this one
           if (key != uniqueKey) {
@@ -93,7 +97,7 @@ class HiveChatDataSource {
         }
       }
     }
-    
+
     if (keysToDelete.isNotEmpty) {
       await _chatBox!.deleteAll(keysToDelete);
       debugPrint('🧹 Cleaned up ${keysToDelete.length} duplicate entries');
@@ -102,35 +106,38 @@ class HiveChatDataSource {
 
   List<ChatHiveModel> getAllChats() {
     _ensureInitialized();
-    
+
     // Get all chats and deduplicate by unique key
     final chatMap = <String, ChatHiveModel>{};
     for (final chat in _chatBox!.values) {
       final key = chat.getUniqueKey();
       // Keep the most recent version if duplicate exists
-      if (!chatMap.containsKey(key) || 
+      if (!chatMap.containsKey(key) ||
           chatMap[key]!.updatedAt.isBefore(chat.updatedAt)) {
         chatMap[key] = chat;
       }
     }
-    
+
     final chats = chatMap.values.toList();
-    
+
     chats.sort((a, b) {
       // Pinned chats always at top
       if (a.isPinned && !b.isPinned) return -1;
       if (!a.isPinned && b.isPinned) return 1;
-      
+
       // Use sort_time first, fallback to last_message_time, then updatedAt
       final aTime = a.sortTime ?? a.lastMessageTime ?? a.updatedAt;
       final bTime = b.sortTime ?? b.lastMessageTime ?? b.updatedAt;
-      
+
       // Sort in descending order (most recent first)
       return bTime.compareTo(aTime);
     });
-    
-    debugPrint('📊 getAllChats: Retrieved ${chats.length} unique chats from ${_chatBox!.length} total entries');
-    
+
+    if (kDebugMode) {
+      debugPrint(
+          '📊 getAllChats: Retrieved ${chats.length} unique chats from ${_chatBox!.length} total entries');
+    }
+
     return chats;
   }
 
@@ -146,10 +153,10 @@ class HiveChatDataSource {
 
   Future<void> saveChat(ChatHiveModel chat) async {
     _ensureInitialized();
-    
+
     final key = chat.getUniqueKey();
     final existing = _chatBox!.get(key);
-    
+
     if (existing == null) {
       await _chatBox!.put(key, chat);
       debugPrint('➕ Added chat: ${chat.name} (key: $key)');
@@ -163,34 +170,91 @@ class HiveChatDataSource {
 
   Future<Map<String, int>> saveChatsBatch(List<ChatHiveModel> chats) async {
     _ensureInitialized();
-    
+
     int added = 0;
     int updated = 0;
     int skipped = 0;
-    
+
     final Map<String, ChatHiveModel> updates = {};
-    
+
     for (final chat in chats) {
       final key = chat.getUniqueKey();
       final existing = _chatBox!.get(key);
-      
+
       if (existing == null) {
         updates[key] = chat;
         added++;
-      } else if (existing.needsUpdate(chat)) {
-        updates[key] = chat;
-        updated++;
       } else {
-        skipped++;
+        // Resolve unread count:
+        // If the user has already read this chat locally (lastReadAt is set and
+        // is >= the API chat's lastMessageTime), keep 0 — do NOT restore the
+        // badge from the API response on every sync/app-resume.
+        // Otherwise use the API value (source of truth for new messages).
+        int resolvedUnread;
+        final localReadAt = existing.lastReadAt;
+        final apiMsgTime = chat.lastMessageTime ?? chat.updatedAt;
+        // lastReadAt >= lastMessageTime is the sole source of truth for read state.
+        // Do NOT also require existing.unreadCount == 0 — that condition caused
+        // the badge to resurrect when the API returned a stale non-zero count
+        // after the user had already read the chat.
+        if (localReadAt != null && !localReadAt.isBefore(apiMsgTime)) {
+          // User already read up to this point — keep 0
+          resolvedUnread = 0;
+        } else {
+          // Trust API count (source of truth for messages we haven't seen)
+          resolvedUnread = chat.unreadCount;
+        }
+
+        // Preserve the most recent sortTime — local may be newer than API
+        // (e.g. a message was received via Firebase after the API snapshot).
+        // Using stale API sort_time would push the chat back in the list.
+        final localSortTime =
+            existing.sortTime ?? existing.lastMessageTime ?? existing.updatedAt;
+        final apiSortTime =
+            chat.sortTime ?? chat.lastMessageTime ?? chat.updatedAt;
+        final resolvedSortTime =
+            localSortTime.isAfter(apiSortTime) ? localSortTime : apiSortTime;
+
+        final merged = ChatHiveModel(
+          id: chat.id,
+          type: chat.type,
+          name: chat.name,
+          profilePicture: chat.profilePicture,
+          localImagePath: chat.localImagePath ?? existing.localImagePath,
+          lastMessage: chat.lastMessage,
+          lastMessageTime: chat.lastMessageTime,
+          unreadCount: resolvedUnread,
+          isPinned: chat.isPinned,
+          attendanceGroup: chat.attendanceGroup,
+          actualRole: chat.actualRole,
+          createdAt: chat.createdAt,
+          updatedAt: chat.updatedAt,
+          // Preserve local lastReadAt — never overwrite with null from API
+          lastReadAt: existing.lastReadAt ?? chat.lastReadAt,
+          memberCount: chat.memberCount,
+          groupType: chat.groupType,
+          role: chat.role,
+          mobile: chat.mobile,
+          className: chat.className,
+          sectionName: chat.sectionName,
+          sortTime: resolvedSortTime,
+        );
+        if (existing.needsUpdate(merged)) {
+          updates[key] = merged;
+          updated++;
+        } else {
+          skipped++;
+        }
       }
     }
-    
+
     if (updates.isNotEmpty) {
       await _chatBox!.putAll(updates);
     }
-    
-    debugPrint('💾 Batch save: $added added, $updated updated, $skipped skipped');
-    
+
+    debugPrint(
+        '💾 Batch save: $added added, $updated updated, $skipped skipped');
+
     return {
       'added': added,
       'updated': updated,
@@ -207,7 +271,7 @@ class HiveChatDataSource {
     bool incrementUnread = false,
   }) async {
     _ensureInitialized();
-    
+
     final key = ChatHiveModel.buildKey(
       id: chatId,
       type: chatType,
@@ -215,7 +279,8 @@ class HiveChatDataSource {
     );
     final chat = _chatBox!.get(key);
     if (chat != null) {
-      final newUnreadCount = incrementUnread ? chat.unreadCount + 1 : chat.unreadCount;
+      final newUnreadCount =
+          incrementUnread ? chat.unreadCount + 1 : chat.unreadCount;
       final updated = chat.copyWith(
         lastMessage: lastMessage,
         lastMessageTime: lastMessageTime,
@@ -246,7 +311,8 @@ class HiveChatDataSource {
         sortTime: lastMessageTime,
       );
       await _chatBox!.put(key, updatedWithSort);
-      debugPrint('📬 Updated $key | sortTime: $lastMessageTime | Unread: $newUnreadCount');
+      debugPrint(
+          '📬 Updated $key | sortTime: $lastMessageTime | Unread: $newUnreadCount');
     } else {
       debugPrint('⚠️ Chat $key not found');
     }
@@ -259,9 +325,10 @@ class HiveChatDataSource {
     debugPrint('💬 Upserted chat: ${chat.name} (key: $key)');
   }
 
-  Future<void> updateUnreadCount(String chatId, String chatType, int count, dynamic attendance_group) async {
+  Future<void> updateUnreadCount(String chatId, String chatType, int count,
+      dynamic attendance_group) async {
     _ensureInitialized();
-    
+
     final key = ChatHiveModel.buildKey(
       id: chatId,
       type: chatType,
@@ -269,8 +336,34 @@ class HiveChatDataSource {
     );
     final chat = _chatBox!.get(key);
     if (chat != null) {
-      final updated = chat.copyWith(unreadCount: count);
+      // When clearing to 0 (marking as read), stamp lastReadAt with now so
+      // saveChatsBatch can detect the read state survives app restarts.
+      final readAt = count == 0 ? DateTime.now() : chat.lastReadAt;
+      final updated = ChatHiveModel(
+        id: chat.id,
+        type: chat.type,
+        name: chat.name,
+        profilePicture: chat.profilePicture,
+        localImagePath: chat.localImagePath,
+        lastMessage: chat.lastMessage,
+        lastMessageTime: chat.lastMessageTime,
+        unreadCount: count,
+        isPinned: chat.isPinned,
+        attendanceGroup: chat.attendanceGroup,
+        actualRole: chat.actualRole,
+        createdAt: chat.createdAt,
+        updatedAt: DateTime.now(),
+        lastReadAt: readAt,
+        memberCount: chat.memberCount,
+        groupType: chat.groupType,
+        role: chat.role,
+        mobile: chat.mobile,
+        className: chat.className,
+        sectionName: chat.sectionName,
+        sortTime: chat.sortTime,
+      );
       await _chatBox!.put(key, updated);
+      debugPrint('💬 updateUnreadCount $key → $count (lastReadAt=$readAt)');
     }
   }
 
@@ -281,7 +374,7 @@ class HiveChatDataSource {
     dynamic attendanceGroup = false,
   }) async {
     _ensureInitialized();
-    
+
     final key = ChatHiveModel.buildKey(
       id: chatId,
       type: chatType,
@@ -334,7 +427,37 @@ class HiveChatDataSource {
 
   Stream<List<ChatHiveModel>> watchAllChats() {
     _ensureInitialized();
-    return _chatBox!.watch().map((_) => getAllChats());
+    late final StreamController<List<ChatHiveModel>> controller;
+    StreamSubscription? subscription;
+    Timer? debounceTimer;
+
+    void scheduleEmit() {
+      debounceTimer?.cancel();
+      debounceTimer = Timer(const Duration(milliseconds: 120), () {
+        if (!controller.isClosed) {
+          controller.add(getAllChats());
+        }
+      });
+    }
+
+    controller = StreamController<List<ChatHiveModel>>(
+      onListen: () {
+        subscription = _chatBox!.watch().listen(
+          (_) => scheduleEmit(),
+          onError: (error, stackTrace) {
+            if (!controller.isClosed) {
+              controller.addError(error, stackTrace);
+            }
+          },
+        );
+      },
+      onCancel: () async {
+        debounceTimer?.cancel();
+        await subscription?.cancel();
+      },
+    );
+
+    return controller.stream;
   }
 
   DateTime? getLastSyncTime() {
@@ -361,7 +484,8 @@ class HiveChatDataSource {
 
   void _ensureInitialized() {
     if (_chatBox == null || !_chatBox!.isOpen) {
-      throw Exception('HiveChatDataSource not initialized. Call initialize() first.');
+      throw Exception(
+          'HiveChatDataSource not initialized. Call initialize() first.');
     }
   }
 }

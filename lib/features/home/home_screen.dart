@@ -32,11 +32,16 @@ class HomeScreen extends ConsumerStatefulWidget {
   ConsumerState<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends ConsumerState<HomeScreen> {
+class _HomeScreenState extends ConsumerState<HomeScreen>
+    with WidgetsBindingObserver {
   final TextEditingController _searchController = TextEditingController();
   final MessageSyncService _messageSyncService = MessageSyncService();
   bool _isSearching = false;
   String? _conversationSyncSignature;
+  // Throttle resume refresh — avoid duplicate syncs if user switches apps quickly
+  DateTime? _lastResumeSync;
+  // Cache queue total so _buildQueueStatusBanner doesn’t call getQueueStats() on every build
+  int _queueTotal = 0;
 
   void initDeepLinks() {
     final appLinks = AppLinks();
@@ -79,6 +84,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final user = ref.read(authProvider).user;
@@ -88,6 +94,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         await ref
             .read(optimizedChatProvider.notifier)
             .initialize(userId: user.id);
+        // Trigger offline sync once after chats are loaded — not on every build
+        final chats = ref.read(optimizedChatProvider).chats;
+        _scheduleConversationOfflineSync(chats);
       }
       // FirebaseMessageListener handles both onMessage and onMessageOpenedApp
       FirebaseMessageListener.init(ref);
@@ -178,13 +187,36 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _onAppResumed();
+    }
+  }
 
+  /// Called when app comes back to foreground from recent apps or background.
+  /// Refreshes chat list so unread counts and new messages are reflected immediately.
+  void _onAppResumed() {
+    final now = DateTime.now();
+    // Throttle: skip if resumed within last 30 seconds to avoid redundant API calls
+    if (_lastResumeSync != null &&
+        now.difference(_lastResumeSync!).inSeconds < 30) {
+      debugPrint('⏭️ [HomeScreen] Resume sync throttled');
+      return;
+    }
+    _lastResumeSync = now;
+    debugPrint('🔄 [HomeScreen] App resumed — refreshing chat list');
+    ref.read(optimizedChatProvider.notifier).refresh();
+    // Re-trigger offline sync with current chats after resume
+    final chats = ref.read(optimizedChatProvider).chats;
+    _scheduleConversationOfflineSync(chats);
+  }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _messageSyncService.stopChatListFirebaseSync();
     _searchController.dispose();
-    // TODO: implement dispose
     super.dispose();
   }
 
@@ -192,7 +224,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Widget build(BuildContext context) {
     final authState = ref.watch(authProvider);
     final chatState = ref.watch(optimizedChatProvider);
-    _scheduleConversationOfflineSync(chatState.chats);
+    // NOTE: _scheduleConversationOfflineSync is called from initState postFrameCallback
+    // and _onAppResumed only — NOT here, to avoid Firebase sync on every rebuild.
 
     return Scaffold(
       appBar: AppBar(
@@ -210,8 +243,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   // Implement search functionality
                 },
               )
-            :
-        const Text('Gateway Messenger'),
+            : const Text('Gateway Messenger'),
         actions: [
           if (!_isSearching)
             IconButton(
@@ -310,30 +342,29 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final userRole =
         actualRole == 'no user' ? user.role.toLowerCase() : actualRole;
 
+    // Exclude unreadCount from signature — badge changes must not restart
+    // background Firebase sync (wasteful + causes unnecessary Firebase reads).
     final signature = chats.take(30).map((chat) {
       final time = chat.sortTime ?? chat.lastMessageTime ?? chat.updatedAt;
-      return '${chat.type}_${chat.id}_${time.millisecondsSinceEpoch}_${chat.unreadCount}';
+      return '${chat.type}_${chat.id}_${time.millisecondsSinceEpoch}';
     }).join('|');
 
     final nextSignature = '${user.id}|$userRole|$signature';
     if (_conversationSyncSignature == nextSignature) return;
     _conversationSyncSignature = nextSignature;
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _messageSyncService.startChatListFirebaseSync(
-        chats: chats,
-        currentUserId: user.id,
-        userRole: userRole,
-      );
-    });
+    // Run sync directly — caller already ensures this is not inside build()
+    if (!mounted) return;
+    _messageSyncService.startChatListFirebaseSync(
+      chats: chats,
+      currentUserId: user.id,
+      userRole: userRole,
+    );
   }
 
   Widget _buildQueueStatusBanner() {
-    final queueStats = OfflineQueueService.getQueueStats();
-    final total = queueStats['total'] ?? 0;
-
-    if (total == 0) return const SizedBox.shrink();
+    // Uses cached _queueTotal — updated on resume/init, not on every build
+    if (_queueTotal == 0) return const SizedBox.shrink();
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -344,7 +375,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           const SizedBox(width: 8),
           Expanded(
             child: Text(
-              '$total message${total > 1 ? 's' : ''} syncing in background',
+              '$_queueTotal message${_queueTotal > 1 ? 's' : ''} syncing in background',
               style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
             ),
           ),
@@ -469,6 +500,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           parent: BouncingScrollPhysics(),
         ),
         addRepaintBoundaries: true,
+        addAutomaticKeepAlives: false,
         itemBuilder: (context, index) {
           final chat = chatState.chats[index];
           return _buildChatTile(chat);
@@ -477,121 +509,131 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  Widget _buildChatTile(chat) {
-    return chat.id == '' ||  chat.name == 'Unknown' ? SizedBox() : ListTile(
-      onTap: () async {
-        // Mark as read immediately for smooth UX
-        if (chat.unreadCount > 0) {
-          ref
-              .read(optimizedChatProvider.notifier)
-              .markAsRead(chat.id, chat.type, chat.attendanceGroup);
-        }
+  Widget _buildChatTile(ChatHiveModel chat) {
+    return chat.id == '' || chat.name == 'Unknown'
+        ? const SizedBox.shrink()
+        : ListTile(
+            key: ValueKey(chat.getUniqueKey()),
+            onTap: () async {
+              // Mark as read immediately for smooth UX
+              if (chat.unreadCount > 0) {
+                ref
+                    .read(optimizedChatProvider.notifier)
+                    .markAsRead(chat.id, chat.type, chat.attendanceGroup ?? false);
+              }
 
-        debugPrint("Groupchat.attendanceGroup ${chat.type.toString()}");
-        debugPrint("Groupchat.attendanceGroup ${chat.attendanceGroup}");
+              debugPrint("Groupchat.attendanceGroup ${chat.type.toString()}");
+              debugPrint("Groupchat.attendanceGroup ${chat.attendanceGroup}");
 
-
-        if (chat.type == 'group') {
-          await context.push(
-              '/chat/${chat.id}?attendance_group=${chat.attendanceGroup}&type=group&name=${Uri.encodeComponent(chat.name)}');
-        } else {
-          await context.push(
-              '/chat/${chat.id}?attendance_group=${chat.attendanceGroup}&type=user&name=${Uri.encodeComponent(chat.name)}');
-        }
-        // Refresh chat list when returning from chat screen
-        ref.read(optimizedChatProvider.notifier).refresh();
-      },
-      onLongPress: () => _showChatOptions(chat),
-      leading: Stack(
-        children: [
-          CachedProfileImage(
-            imagePath: chat.imagePath,
-            size: 50,
-            fallbackText: chat.name,
-          ),
-          if (chat.isPinned)
-            Positioned(
-              top: 0,
-              right: 0,
-              child: Container(
-                width: 16,
-                height: 16,
-                decoration: BoxDecoration(
-                  color: Colors.grey[600],
-                  shape: BoxShape.circle,
+              if (chat.type == 'group') {
+                await context.push(
+                    '/chat/${chat.id}?attendance_group=${chat.attendanceGroup}&type=group&name=${Uri.encodeComponent(chat.name)}');
+              } else {
+                await context.push(
+                    '/chat/${chat.id}?attendance_group=${chat.attendanceGroup}&type=user&name=${Uri.encodeComponent(chat.name)}');
+              }
+              // Refresh chat list when returning from chat screen
+              ref.read(optimizedChatProvider.notifier).refresh();
+            },
+            onLongPress: () => _showChatOptions(chat),
+            leading: Stack(
+              children: [
+                CachedProfileImage(
+                  imagePath: chat.imagePath,
+                  size: 50,
+                  fallbackText: chat.name,
                 ),
-                child: const Icon(
-                  Icons.push_pin,
-                  size: 10,
-                  color: Colors.white,
+                if (chat.isPinned)
+                  Positioned(
+                    top: 0,
+                    right: 0,
+                    child: Container(
+                      width: 16,
+                      height: 16,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[600],
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.push_pin,
+                        size: 10,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            title: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    chat.name,
+                    style: TextStyle(
+                      fontWeight: chat.unreadCount > 0
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
-              ),
+                if (chat.lastMessageTime != null)
+                  Text(
+                    _formatTime(chat.lastMessageTime ?? DateTime.now()),
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: chat.unreadCount > 0
+                          ? Theme.of(context).primaryColor
+                          : Colors.grey[600],
+                      fontWeight: chat.unreadCount > 0
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                    ),
+                  ),
+              ],
             ),
-        ],
-      ),
-      title: Row(
-        children: [
-          Expanded(
-            child: Text(
-              chat.name,
-              style: TextStyle(
-                fontWeight:
-                    chat.unreadCount > 0 ? FontWeight.bold : FontWeight.normal,
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          if (chat.lastMessageTime != null)
-            Text(
-              _formatTime(chat.lastMessageTime),
-              style: TextStyle(
-                fontSize: 12,
-                color: chat.unreadCount > 0
-                    ? Theme.of(context).primaryColor
-                    : Colors.grey[600],
-                fontWeight:
-                    chat.unreadCount > 0 ? FontWeight.bold : FontWeight.normal,
-              ),
-            ),
-        ],
-      ),
-      subtitle: Row(
-        children: [
-          Expanded(
-            child: Text(
-              // chat.lastMessage ?? 'Tap to start chatting',
-               'Tap to start chatting',
-              style: TextStyle(
-                color: chat.unreadCount > 0 ? Colors.grey : Colors.grey[600],
-                fontWeight:
-                    chat.unreadCount > 0 ? FontWeight.w500 : FontWeight.normal,
-                fontStyle: chat.lastMessage == null
-                    ? FontStyle.italic
-                    : FontStyle.normal,
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
-      ),
-      trailing: chat.unreadCount > 0
-          ? Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: Theme.of(context).primaryColor,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                chat.unreadCount > 99 ? '99+' : chat.unreadCount.toString(),
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 12,
-                  fontWeight: FontWeight.bold,
+            subtitle: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    // chat.lastMessage ?? 'Tap to start chatting',
+                    'Tap to start chatting',
+                    style: TextStyle(
+                      color:
+                          chat.unreadCount > 0 ? Colors.grey : Colors.grey[600],
+                      fontWeight: chat.unreadCount > 0
+                          ? FontWeight.w500
+                          : FontWeight.normal,
+                      fontStyle: chat.lastMessage == null
+                          ? FontStyle.italic
+                          : FontStyle.normal,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
-              ),
-            )
-          : null,
-    );
+              ],
+            ),
+            trailing: chat.unreadCount > 0
+                ? Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).primaryColor,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      // Show 9+ when count exceeds 9, otherwise show actual count
+                      chat.unreadCount > 9
+                          ? '9+'
+                          : chat.unreadCount.toString(),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  )
+                : null,
+          );
   }
 
   String _formatTime(DateTime timestamp) {

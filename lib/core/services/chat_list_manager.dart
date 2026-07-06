@@ -88,13 +88,15 @@ class ChatListManager {
     }
   }
 
-  /// Update chat when receiving a message (real-time update, move to top, increment unread)
+  /// Update chat when receiving a message.
+  /// If isChatScreenOpen is true, unread count stays at 0 (message auto-marked as read).
+  /// If isChatScreenOpen is false, unread count increments normally.
   static Future<void> onMessageReceived({
     required String chatId,
     required String chatType,
     required Message message,
     required String currentUserId,
-    required bool isChatScreenOpen,
+    required bool isChatScreenOpen, // When true, prevents unread count increment
   }) async {
     if (!_initialized || _chatListBox == null) return;
 
@@ -105,6 +107,7 @@ class ChatListManager {
         final chat = Chat.fromJson(Map<String, dynamic>.from(existingChatData));
         
         final newUnreadCount = Map<String, int>.from(chat.unreadCount);
+        // Only increment unread count if user is NOT actively viewing this chat
         if (!isChatScreenOpen && message.senderId != currentUserId) {
           newUnreadCount[currentUserId] = (newUnreadCount[currentUserId] ?? 0) + 1;
         }
@@ -112,6 +115,7 @@ class ChatListManager {
         int apiUnreadCount = 0;
         if (chat.unread_count != null) {
           if (chat.unread_count is int) {
+            // Keep unread count at current value if chat is open (auto-read)
             apiUnreadCount = !isChatScreenOpen && message.senderId != currentUserId 
                 ? (chat.unread_count as int) + 1 
                 : (chat.unread_count as int);
@@ -125,11 +129,11 @@ class ChatListManager {
           lastMessageTime: message.timestamp,
           updatedAt: message.timestamp,
           unreadCount: newUnreadCount,
-          unread_count: apiUnreadCount,
+          unread_count: apiUnreadCount, // Remains 0 if chat is open
         );
         
         await _chatListBox!.put(chatId, updatedChat.toJson());
-        debugPrint('✅ Updated chat $chatId after receiving message (unread: $apiUnreadCount, time: ${message.timestamp})');
+        debugPrint('✅ Updated chat $chatId after receiving message (unread: $apiUnreadCount, isChatOpen: $isChatScreenOpen)');
       } else {
         await _createNewChat(
           chatId: chatId,

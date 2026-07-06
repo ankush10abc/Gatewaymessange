@@ -111,6 +111,8 @@ class ChatNotifier extends StateNotifier<ChatState> {
     state = state.copyWith(chats: sortedChats);
   }
 
+  /// Called when a message is received. If isChatScreenOpen is true,
+  /// the message is immediately marked as read and unread count stays at 0.
   Future<void> onMessageReceived(String chatId, String chatType, Message message, bool isChatScreenOpen) async {
     if (_currentUserId == null) return;
     
@@ -119,7 +121,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
       chatType: chatType,
       message: message,
       currentUserId: _currentUserId!,
-      isChatScreenOpen: isChatScreenOpen,
+      isChatScreenOpen: isChatScreenOpen, // When true, unread count stays at 0
     );
     
     final sortedChats = ChatListManager.getSortedChatList();

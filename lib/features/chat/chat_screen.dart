@@ -25,7 +25,9 @@ import '../../core/services/api_service_simple.dart';
 import '../../core/services/chat_list_update_service.dart';
 import '../../core/services/chat_metadata_service.dart';
 import '../../core/services/firebase_realtime_service.dart';
-// NEW: Import message sync service
+import '../../core/utils/chat_utils.dart';
+import '../../core/services/image_cache_service.dart';
+import '../../core/services/media_compression_service.dart';
 import '../../core/services/message_sync_service.dart';
 import '../../core/services/whatsapp_text_parser.dart';
 import '../../core/storage/storage_service.dart';
@@ -69,7 +71,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   // final ScrollController _scrollController = ScrollController();
   final _scrollController = AutoScrollController();
   int pageCount = 1;
-  bool isFirstTime = true; // Shows 3-sec loader for attendance group on first open
+  bool isFirstTime =
+      true; // Shows 3-sec loader for attendance group on first open
   final TextEditingController _messageController = TextEditingController();
   final FocusNode _focusNode = FocusNode();
   late final ApiService _apiService;
@@ -78,6 +81,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   // NEW: Message sync service for instant loading
   final MessageSyncService _syncService = MessageSyncService();
   final ChatMetadataService _metadataService = ChatMetadataService();
+  final ImageCacheService _imageCacheService = ImageCacheService();
+  // Guards against duplicate background image downloads per message
+  final Set<String> _cachingImages = {};
   StreamSubscription<List<Message>>? _cacheSubscription;
 
   // Real-time state
@@ -94,7 +100,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   bool _isAtBottom = true;
   Timer? _typingTimer;
   String? _currentUserId;
-  bool _isLoadingPermissions = true;
+  final bool _isLoadingPermissions =
+      false; // Start false — input renders immediately, no layout jump
   String? _highlightedMessageId;
   bool _initialMessageSent = false;
   // Track recently sent message IDs to prevent duplicates from Firebase listener
@@ -109,6 +116,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   final Set<String> _markedAsReadMessages = {}; // Track already marked messages
   int _markAsReadApiCallCount = 0; // Limit API calls to 2
   int _loadedBatchCount = 0; // Tracks total batches of 25 messages loaded in UI
+  bool _isOnline =
+      true; // Cached internet status, updated on connectivity checks
+  // tempId → upload progress (0.0–1.0); removed when upload completes/fails
+  final Map<String, double> _uploadProgress = {};
+  // Guards against showing attendance messages before fresh API data is ready
+  final bool _attendanceApiSyncDone = false;
 
   @override
   void initState() {
@@ -130,13 +143,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           ChatHiveModel.parseAttendanceGroup(widget.attendance_group);
       getUserRole();
 
-      // Start 3-sec loader only for attendance groups
-      if (_isAttendanceGroup == true) {
-        Future.delayed(const Duration(milliseconds: 1500), () {
-          if (mounted) setState(() => isFirstTime = false);
-        });
-      } else {
-        isFirstTime = false; // Non-attendance: no loader needed
+      // For attendance groups: isFirstTime stays true until fresh API data
+      // arrives (_syncAttendanceGroupFromApi sets it false). This prevents
+      // stale cached messages from flashing before fresh data is ready.
+      // For non-attendance: no loader needed.
+      if (_isAttendanceGroup != true) {
+        isFirstTime = false;
       }
 
       _initializeChat();
@@ -146,14 +158,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   @override
   void didChangeDependencies() {
-    try {
-      if (widget.chatType.toString().toLowerCase() == 'group') {
-        _refreshAfterAttendance();
-      }
-    } catch (e) {
-      print(e);
-    }
-    // TODO: implement didChangeDependencies
+    // _refreshAfterAttendance is only called explicitly after marking attendance
+    // (from the Mark Attendance button result handler). Calling it here on every
+    // didChangeDependencies causes new→old→new flicker because it fires on first
+    // navigation push as well, racing with _syncAttendanceGroupFromApi.
     super.didChangeDependencies();
   }
 
@@ -230,6 +238,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     _typingSubscription?.cancel();
     _presenceSubscription?.cancel();
     _typingTimer?.cancel();
+    // Clear upload progress map to prevent stale callbacks after dispose
+    _uploadProgress.clear();
     _scrollController.dispose();
     _messageController.dispose();
     _searchController.dispose();
@@ -284,6 +294,111 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     }
   }
 
+  /// Writes 'delivered' status to Firebase for all messages from other users
+  /// that are still in 'sent' state. Called on chat open so the sender sees
+  /// double grey tick even if the receiver was offline when the message arrived.
+  void _markPendingMessagesAsDelivered() {
+    if (_currentUserId == null || widget.chatType == 'group') return;
+    // Resolve the other user's ID: prefer _user['id'] if loaded, else widget.chatId
+    final resolvedOtherUserId = _user?['id']?.toString().isNotEmpty == true
+        ? _user!['id'].toString()
+        : widget.chatId;
+    final firebaseChatId = ChatUtils.generateChatId(
+      widget.chatId,
+      chatType: widget.chatType,
+      currentUserId: _currentUserId,
+      otherUserId: resolvedOtherUserId,
+      attendanceGroup: _isAttendanceGroup,
+    );
+    // Run in background — never blocks UI
+    unawaited(() async {
+      try {
+        debugPrint("_markPendingMessagesAsDelivered $firebaseChatId");
+        final snapshot = await FirebaseRealtimeService.database
+            .ref('chats/$firebaseChatId/messages')
+            .get();
+
+        if (!snapshot.exists || snapshot.value == null) return;
+        final messagesMap = snapshot.value as Map?;
+        if (messagesMap == null) return;
+        for (final entry in messagesMap.entries) {
+          // debugPrint('✅ [Delivered] Marked pending messages as delivered in ${entry}');
+          final msgData = entry.value;
+          if (msgData is! Map) continue;
+          debugPrint('✅ [Delivered] Marked pending messages as delivered in ${msgData}');
+          final senderId = msgData['senderId']?.toString() ??
+              msgData['sender_id']?.toString() ?? '';
+          // Only process messages from other users
+
+          if (senderId.isEmpty || senderId == _currentUserId) continue;
+          final statusMap = msgData['status'];
+          debugPrint('✅ [Delivered] Marked pending messages as delivered infff ${statusMap}');
+          // Cast to Map<String, dynamic> so String key lookup works correctly.
+          // Firebase returns Map<dynamic, dynamic> — direct lookup with a String key returns null.
+          final statusStrMap = statusMap is Map
+              ? Map<String, dynamic>.from(statusMap)
+              : null;
+          // Check both prefixed and raw key for backward compatibility
+          final currentStatus = (statusStrMap?[statusKey(_currentUserId!)] ??
+              statusStrMap?[_currentUserId])?.toString();
+          debugPrint('✅ [Delivered] Marked pending messages as delivered intttt ${currentStatus}');
+          // Only upgrade sent → delivered, never downgrade read → delivered
+          if (currentStatus == null || currentStatus == 'sent') {
+            unawaited(FirebaseRealtimeService.database
+                .ref('chats/$firebaseChatId/messages/${entry.key}/status/${statusKey(_currentUserId!)}')
+                .set('delivered'));
+            if (msgData['msgId'] != null) {
+              unawaited(FirebaseRealtimeService.database
+                  .ref('chats/$firebaseChatId/messages/${msgData['msgId']}/status/${statusKey(_currentUserId!)}')
+                  .set('delivered'));
+            }
+          }
+        }
+        debugPrint('✅ [Delivered] Marked pending messages as delivered in $firebaseChatId');
+      } catch (e) {
+        debugPrint('❌ [Delivered] Error marking delivered: $e');
+      }
+    }());
+  }
+
+  Future<void> _makeAsRead() async {
+    final user = ref.read(authProvider).user;
+    final hasInternet = await InternetChecker.hasInternet();
+    if (hasInternet) {
+      try {
+        if (mounted) {
+                FirebaseRealtimeService.markMessagesAsRead(
+                    widget.chatType, widget.chatId, user!.id,
+                    currentUserId: _currentUserId,
+                    otherUserId: _firebaseOtherUserId,
+                    attendanceGroup: widget.attendance_group ?? false,
+                    groupMembers: widget.chatType == 'group' && _user != null
+                        ? _user!['member_list']
+                        : null);
+
+                // Reset unread count again after Firebase marks messages read
+                ref.read(optimizedChatProvider.notifier).markAsRead(
+                      widget.chatId,
+                      widget.chatType,
+                      widget.attendance_group ?? false,
+                    );
+              }
+      } catch (e) {
+        print("Error $e");
+      }
+    }
+    // Reset unread count again after Firebase marks messages read
+    try {
+      ref.read(optimizedChatProvider.notifier).markAsRead(
+                widget.chatId,
+                widget.chatType,
+                widget.attendance_group ?? false,
+              );
+    } catch (e) {
+      print("Error $e");
+    }
+  }
+
   Future<void> _initializeChat() async {
     debugPrint('📴 Offline - skipping Firebase presence update');
     final user = ref.read(authProvider).user;
@@ -296,6 +411,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     try {
       // Check internet before Firebase operations
       final hasInternet = await InternetChecker.hasInternet();
+      // Cache connectivity state for synchronous use in build (video thumbnails)
+      if (mounted) setState(() => _isOnline = hasInternet);
       debugPrint('AnkushuserRole five $hasInternet');
       try {
         if (hasInternet) {
@@ -380,7 +497,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       // debugPrint('Error in _initializeChat: $e');
     }
 
-    Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
+    // Only scroll to bottom on initial load — not on every re-init
+    if (_messages.isEmpty) {
+      Future.delayed(const Duration(milliseconds: 100), _scrollToBottom);
+    }
   }
 
   /// Called after attendance is marked — fetch page 1, show instantly, sync in background.
@@ -582,12 +702,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       return;
     }
 
-    setState(() {
-      _user = cachedMetadata;
-      _isAttendanceGroup = ChatHiveModel.parseAttendanceGroup(
-        cachedMetadata?['attendance_group'] ?? _isAttendanceGroup,
-      );
-    });
+    // Apply metadata to local state WITHOUT setState — caller will batch
+    // it with the messages setState to avoid a separate rebuild.
+    _user = cachedMetadata;
+    _isAttendanceGroup = ChatHiveModel.parseAttendanceGroup(
+      cachedMetadata['attendance_group'] ?? _isAttendanceGroup,
+    );
 
     debugPrint(
         '✅ Loaded cached metadata: name=${_user?['name']}, attendance=$_isAttendanceGroup');
@@ -595,6 +715,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   void _setupCacheWatcher() {
     _cacheSubscription?.cancel();
+    // Attendance groups use the API as authoritative source — the cache watcher
+    // must not merge stale Hive data on top of fresh API results.
+    // For attendance groups we skip the watcher entirely; _syncAttendanceGroupFromApi
+    // always replaces _messages directly via setState.
+    if (_isAttendanceGroup == true) return;
+
+    // Skip the first emission — it always mirrors what _loadInitialMessages
+    // already rendered via setState, so acting on it causes a duplicate rebuild.
+    bool isFirstEmission = true;
     _cacheSubscription = _syncService
         .watchMessages(
       widget.chatId,
@@ -604,19 +733,73 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       isAttendanceGroup: _isAttendanceGroup,
     )
         .listen((cachedMessages) {
-      // debugPrint("Amnkush cachedMessages $cachedMessages");
+      // Skip first emission — already shown by _loadInitialMessages setState
+      if (isFirstEmission) {
+        isFirstEmission = false;
+        return;
+      }
       if (!mounted) return;
+      // Skip if cache is empty and we already have messages — background
+      // writes (e.g. status updates) should not clear the UI.
       if (cachedMessages.isEmpty && _messages.isNotEmpty) return;
 
+      // Compute the merged list first WITHOUT touching setState.
+      final merged = _messages.isEmpty
+          ? cachedMessages
+          : _mergeMessages(_messages, cachedMessages);
+
+      // Skip rebuild entirely if the visible message set hasn't changed.
+      // Compare by stable IDs so minor metadata changes don't cause re-renders.
+      if (!_hasMessageListChanged(_messages, merged)) return;
+
+      final wasAtBottom = _isAtBottom;
       setState(() {
-        _messages = _messages.isEmpty
-            ? cachedMessages
-            : _mergeMessages(_messages, cachedMessages);
-        _isLoadingPermissions = false;
+        _messages = merged;
       });
+
+      // Only auto-scroll if user was already at the bottom before the update
+      if (wasAtBottom) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+      }
     }, onError: (error) {
       debugPrint('Message cache watch error: $error');
     });
+  }
+
+  /// Returns true only when the visible message set has actually changed.
+  /// Prevents unnecessary rebuilds triggered by background cache writes
+  /// (e.g. read-receipt updates, Firebase sync) that don't affect what the user sees.
+  /// Only compares the first 50 messages (visible window) to avoid UI-thread blocking
+  /// on large chat histories — this was the source of occasional app freezes.
+  bool _hasMessageListChanged(List<Message> current, List<Message> next) {
+    if (current.length != next.length) return true;
+    // Cap comparison to visible window to keep this O(1) in practice
+    final limit = current.length < 50 ? current.length : 50;
+    for (var i = 0; i < limit; i++) {
+      final a = current[i];
+      final b = next[i];
+      // Primary key: prefer firebaseId, then msgId, then id
+      final aKey = a.firebaseId?.isNotEmpty == true
+          ? a.firebaseId!
+          : (a.msgId?.isNotEmpty == true ? a.msgId! : a.id);
+      final bKey = b.firebaseId?.isNotEmpty == true
+          ? b.firebaseId!
+          : (b.msgId?.isNotEmpty == true ? b.msgId! : b.id);
+      if (aKey != bKey) return true;
+      // Detect status tick changes (sending → sent → delivered → read).
+      // Compare the full status map — per-user keys like status['userId'] = 'read'
+      // are what drive double/blue tick rendering.
+      if (a.status.length != b.status.length) return true;
+      for (final entry in b.status.entries) {
+        if (a.status[entry.key] != entry.value) return true;
+      }
+      // Also detect when Firebase replaces a 'default'-keyed status with per-user keys
+      // (e.g. {'default': 'sent'} → {'1': 'sent', '3': 'delivered'})
+      if (a.status.containsKey('default') && !b.status.containsKey('default')) return true;
+      // Detect text edits
+      if (a.text != b.text) return true;
+    }
+    return false;
   }
 
   Future<void> _loadInitialMessages() async {
@@ -637,16 +820,26 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         isAttendanceGroup: _isAttendanceGroup,
       );
 
-      // Step 4: Display cached messages instantly and ALWAYS hide loader
-      if (mounted) {
+      // Pre-seed read-tracking set from SQLite so already-read messages are
+      // never re-processed as unread after app restart/kill.
+      final persistedReadIds = await _syncService.getReadMessageIds(
+        widget.chatId,
+        widget.chatType,
+      );
+      _markedAsReadMessages.addAll(persistedReadIds);
+
+      // Step 4: Display cached messages instantly.
+      // For attendance groups: skip showing stale cache — the isFirstTime
+      // loader hides the list for 2 s while fresh API data loads.
+      // This prevents the old→new→old flicker entirely.
+      if (mounted && _isAttendanceGroup != true) {
         setState(() {
-          _messages = cachedMessages; // Always set, even if empty
-          _isLoadingPermissions = false; // ✅ ALWAYS hide loader, even offline
-          // Initialize batch count based on initial cached messages
+          _messages = cachedMessages;
           _loadedBatchCount = (cachedMessages.length / 25).ceil();
-          debugPrint(
-              '📦 Initial batches from cache: $_loadedBatchCount (${cachedMessages.length} messages)');
         });
+      } else if (mounted) {
+        // Still track batch count for pagination, but don’t render stale data
+        _loadedBatchCount = (cachedMessages.length / 25).ceil();
       }
 
       debugPrint(
@@ -657,6 +850,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
       // Step 5: Check internet - CRITICAL DECISION POINT
       final hasInternet = await InternetChecker.hasInternet();
+      // Keep _isOnline in sync so video thumbnails reflect current state
+      if (mounted) setState(() => _isOnline = hasInternet);
 
       if (!hasInternet) {
         debugPrint(
@@ -665,12 +860,21 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         return;
       }
 
+      // Mark pending messages as delivered for private chats when chat opens.
+      // This covers the case where the receiver was offline/background when
+      // the message arrived — ensures sender sees double grey tick.
+      if (hasInternet && widget.chatType != 'group') {
+        _markPendingMessagesAsDelivered();
+      }
+
       debugPrint('🌐 ONLINE MODE - Syncing with API and Firebase');
 
       // Step 6: Online sync in background (non-blocking)
       if (_isAttendanceGroup == true) {
+        // For attendance groups: always replace with fresh API data.
+        // Never append — the API page-1 response is the authoritative list.
         unawaited(_syncAttendanceGroupFromApi(
-          append: cachedMessages.isNotEmpty,
+          append: false,
         ));
       } else {
         // Sync recent Firebase messages in background
@@ -686,11 +890,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       }
     } catch (e) {
       debugPrint('❌ Load initial messages error: $e');
-      if (mounted) {
-        setState(() {
-          _isLoadingPermissions = false; // ✅ Hide loader on error too
-        });
-      }
     }
   }
 
@@ -736,6 +935,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     final hasInternet = await InternetChecker.hasInternet();
     if (!hasInternet) {
       debugPrint('📴 Skipping attendance group sync - offline');
+      // Show cached messages when offline instead of keeping the loader forever
+      if (mounted) setState(() => isFirstTime = false);
       return;
     }
 
@@ -762,33 +963,45 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       setState(() {
         if (cachedMetadata != null) _user = cachedMetadata;
         _isAttendanceGroup = true;
+        // Dismiss loader once fresh API data arrives (success or empty)
+        isFirstTime = false;
 
         if (freshMessages.isNotEmpty) {
-          // Merge without duplicates instead of blindly inserting
-          final existingIds = <String>{
-            for (final m in _messages) ...[
-              if ((m.firebaseId ?? '').isNotEmpty) m.firebaseId!,
-              if ((m.msgId ?? '').isNotEmpty && m.msgId != '0') m.msgId!,
-              if (m.id.isNotEmpty && m.id != '0') m.id,
-            ],
-          };
-          final deduped = freshMessages.where((m) {
-            final fbId = m.firebaseId ?? '';
-            final mId = m.msgId ?? '';
-            return !existingIds.contains(fbId) &&
-                !(mId.isNotEmpty && mId != '0' && existingIds.contains(mId)) &&
-                !existingIds.contains(m.id);
-          }).toList();
-          _messages.addAll(deduped);
-          _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+          if (!append) {
+            // Replace entirely — API page-1 is the authoritative fresh list.
+            // This prevents old cached messages from being mixed with new ones.
+            _messages = freshMessages
+              ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
+          } else {
+            // Paginating: append only genuinely new messages
+            final existingIds = <String>{
+              for (final m in _messages) ...[
+                if ((m.firebaseId ?? '').isNotEmpty) m.firebaseId!,
+                if ((m.msgId ?? '').isNotEmpty && m.msgId != '0') m.msgId!,
+                if (m.id.isNotEmpty && m.id != '0') m.id,
+              ],
+            };
+            final deduped = freshMessages.where((m) {
+              final fbId = m.firebaseId ?? '';
+              final mId = m.msgId ?? '';
+              return !existingIds.contains(fbId) &&
+                  !(mId.isNotEmpty &&
+                      mId != '0' &&
+                      existingIds.contains(mId)) &&
+                  !existingIds.contains(m.id);
+            }).toList();
+            _messages.addAll(deduped);
+            _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+          }
         }
-        _isLoadingPermissions = false;
       });
 
-      _setupCacheWatcher();
+      // Re-setup cache watcher only if it wasn’t already active
+      if (_cacheSubscription == null) _setupCacheWatcher();
     } catch (e) {
       debugPrint('❌ Attendance group API sync failed: $e');
-      if (mounted) setState(() => _isLoadingPermissions = false);
+      // Ensure loader is dismissed even on error so the screen is not stuck
+      if (mounted) setState(() => isFirstTime = false);
     }
   }
 
@@ -834,10 +1047,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       final previousAttendanceGroup = _isAttendanceGroup;
       userData['attendance_group'] = isAttendance;
 
-      setState(() {
-        _user = userData;
-        _isAttendanceGroup = isAttendance;
-      });
+      // Update metadata fields directly — no setState here to avoid a visible
+      // rebuild that flickers the subtitle while messages are already shown.
+      // Only setState when attendanceGroup type truly changed (rare path).
+      _user = userData;
+      _isAttendanceGroup = isAttendance;
 
       await _syncService.saveChatMetadataToCache(
         chatId: widget.chatId,
@@ -851,7 +1065,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       }
 
       if (_isAttendanceGroup == true) {
-        await _syncAttendanceGroupFromApi(append: _messages.isNotEmpty);
+        // Already synced from API via _syncAttendanceGroupFromApi — skip to avoid
+        // a second API call that would append old data on top of fresh messages.
         return;
       }
 
@@ -904,27 +1119,51 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           if (realtimeMessages.isEmpty || !mounted) return;
 
           // Filter out messages that were just sent by current user
-          // to prevent duplicates from optimistic UI updates
+          // to prevent duplicates from optimistic UI updates.
+          // NOTE: Do NOT filter messages that have status updates (same firebaseId
+          // but different status) — those are needed for double/blue tick rendering.
           final filteredMessages = realtimeMessages.where((msg) {
-            // Always keep messages from other users
+            // Always keep messages from other users (needed for unread + status)
             if (msg.senderId != _currentUserId) return true;
 
-            // For own messages: Skip if already exists in UI
-            // Check by firebase ID or by timestamp (within 5 seconds)
+            debugPrint("Fiver duplicate message from Firebase ${msg.toJson()}");
             final firebaseId = msg.firebaseId ?? msg.id;
-            final isDuplicate = _messages.any((existing) {
-              // Match by firebase ID
-              final existingFirebaseId = existing.firebaseId ?? existing.id;
-              if (firebaseId == existingFirebaseId) return true;
 
+            // Check if this is a status update for an existing message
+            // (same firebaseId or msgId but status map changed) — must NOT be filtered
+            final existingMsg = _messages.firstWhere(
+              (m) =>
+                  (m.firebaseId ?? m.id) == firebaseId ||
+                  (msg.msgId != null &&
+                      msg.msgId!.isNotEmpty &&
+                      msg.msgId != '0' &&
+                      m.msgId == msg.msgId),
+              orElse: () => msg,
+            );
+            // If status changed (deep compare), keep the message so tick updates
+            if (existingMsg != msg) {
+              final statusChanged = existingMsg.status.length != msg.status.length ||
+                  msg.status.entries.any((e) => existingMsg.status[e.key] != e.value);
+              if (statusChanged) return true;
+            }
+
+            // For own messages: skip only if it's a true duplicate (same content,
+            // same status, sent within 10 seconds) — not a status update
+            final isDuplicate = _messages.any((existing) {
+              final existingFirebaseId = existing.firebaseId ?? existing.id;
+              // Same firebaseId AND same status = true duplicate, skip it
+              if (firebaseId == existingFirebaseId &&
+                  existing.status.toString() == msg.status.toString()) {
+                return true;
+              }
               // Match by timestamp + sender (for messages sent in last 10 seconds)
               if (existing.senderId == msg.senderId &&
                   existing.text == msg.text &&
                   existing.timestamp.difference(msg.timestamp).abs().inSeconds <
-                      10) {
+                      10 &&
+                  existing.firebaseId == null) {
                 return true;
               }
-
               return false;
             });
 
@@ -958,19 +1197,25 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
           debugPrint(
               '🟢 [FIREBASE] After merge: ${_messages.length} messages (was $previousLength)');
-          // Handle new incoming message
+          // Handle new incoming messages - auto-mark as read if user is actively viewing this chat
           if (_messages.length > previousLength &&
               filteredMessages.isNotEmpty) {
-            final newMessage = filteredMessages.first;
+            // Process all new incoming messages from other users
+            for (final newMessage in filteredMessages) {
+              if (newMessage.senderId != _currentUserId) {
+                // Auto-mark as read immediately since user is actively viewing this chat
+                // This prevents unread count from increasing while user is in the chat
+                debugPrint("_autoMarkIncomingMessageAsRead $newMessage");
+                _autoMarkIncomingMessageAsRead(newMessage);
 
-            // Update chat list if message is from another user
-            if (newMessage.senderId != _currentUserId) {
-              ref.read(chatProvider.notifier).onMessageReceived(
-                    widget.chatId,
-                    widget.chatType,
-                    newMessage,
-                    true,
-                  );
+                // Update chat list with the message but mark as already read
+                ref.read(chatProvider.notifier).onMessageReceived(
+                      widget.chatId,
+                      widget.chatType,
+                      newMessage,
+                      true, // isRead = true because user is actively viewing
+                    );
+              }
             }
           }
 
@@ -986,7 +1231,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             widget.chatId, widget.chatType,
             currentUserId: _currentUserId,
             attendanceGroup: _isAttendanceGroup,
-            otherUserId: _currentUserId)
+            otherUserId: _firebaseOtherUserId)
         .listen((typingData) {
       if (mounted) {
         final typingUsers = <String, bool>{};
@@ -1060,66 +1305,142 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   bool _canSendAttachments() {
     if (widget.chatType != 'group' || _user == null) return true;
+    debugPrint(
+        "Ankush banawade Gallery chatType ${_user!['allow_attachments']}");
     return _user!['allow_attachments'] == true;
+  }
+
+  /// Status priority: read(2) > delivered(1) > sent(0) > sending(-1)
+  static const _statusPriority = {'read': 2, 'delivered': 1, 'sent': 0, 'sending': -1};
+
+  /// Merge two status maps, keeping the highest-priority value per user key.
+  /// Prevents the cache watcher from downgrading a live Firebase status update
+  /// (e.g. reverting blue tick → grey tick when stale SQLite data arrives).
+  Map<String, String> _mergeStatus(
+      Map<String, String> current, Map<String, String> incoming) {
+    if (current.isEmpty) return incoming;
+    if (incoming.isEmpty) return current;
+    final merged = Map<String, String>.from(current);
+    for (final entry in incoming.entries) {
+      final key = entry.key;
+      final incomingVal = entry.value;
+      final currentVal = merged[key];
+      if (currentVal == null) {
+        merged[key] = incomingVal;
+      } else {
+        // Keep whichever status is higher priority — never downgrade
+        final currentPriority = _statusPriority[currentVal] ?? 0;
+        final incomingPriority = _statusPriority[incomingVal] ?? 0;
+        if (incomingPriority > currentPriority) {
+          merged[key] = incomingVal;
+        }
+      }
+    }
+    return merged;
   }
 
   List<Message> _mergeMessages(
       List<Message> apiMessages, List<Message> realtimeMessages) {
-    // debugPrint('🔀 [MERGE] Starting merge: ${apiMessages.length} existing + ${realtimeMessages.length} new');
-
+    // Primary map: keyed by firebaseId (push key) for Firebase messages,
+    // or by msgId for API-only messages (no firebaseId).
+    // This ensures Firebase status updates always merge into the correct message
+    // even when the existing message was loaded from API without a firebaseId.
     final messageMap = <String, Message>{};
-    final firebaseIdToItem = <String, Message>{};
 
-    // Add existing messages by firebaseId or id
+    // Build secondary index: msgId → map key, so Firebase messages can find
+    // their API-loaded counterpart by server numeric ID.
+    final msgIdToKey = <String, String>{};
+
     for (final message in apiMessages) {
-      final key = message.firebaseId ?? message.id;
-      if (key.isNotEmpty) {
-        messageMap[key] = message;
-        // debugPrint('🔀 [MERGE] Existing: key=$key, id=${message.id}, fbId=${message.firebaseId}');
+      // Prefer firebaseId as key; fall back to msgId, then id
+      final key = (message.firebaseId?.isNotEmpty == true)
+          ? message.firebaseId!
+          : (message.msgId?.isNotEmpty == true && message.msgId != '0')
+              ? 'msgid_${message.msgId}'
+              : (message.id.startsWith('temp_') ? message.id : 'api_${message.id}');
+      messageMap[key] = message;
+      // Index by msgId so incoming Firebase messages can find this entry
+      if (message.msgId != null && message.msgId!.isNotEmpty && message.msgId != '0') {
+        msgIdToKey[message.msgId!] = key;
       }
     }
 
-    // Merge realtime messages
     for (final message in realtimeMessages) {
       final firebaseId = message.firebaseId;
       if (firebaseId != null && firebaseId.isNotEmpty) {
-        // Remove temp message if exists
+        // Remove temp message if exists (optimistic UI replacement)
         final tempKey = messageMap.keys.firstWhere(
           (k) => k.startsWith('temp_') && messageMap[k]?.text == message.text,
           orElse: () => '',
         );
-        if (tempKey.isNotEmpty) {
-          // debugPrint('🔀 [MERGE] Removing temp message: $tempKey');
-          messageMap.remove(tempKey);
+        if (tempKey.isNotEmpty) messageMap.remove(tempKey);
+
+        // Try direct firebaseId match first
+        String? existingKey;
+        if (messageMap.containsKey(firebaseId)) {
+          existingKey = firebaseId;
+        } else if (message.msgId != null &&
+            message.msgId!.isNotEmpty &&
+            message.msgId != '0' &&
+            msgIdToKey.containsKey(message.msgId)) {
+          // Firebase message matches an API-loaded message by msgId —
+          // this is the key fix: status updates now propagate to the sender's UI
+          // even when the existing message was loaded from API without a firebaseId.
+          existingKey = msgIdToKey[message.msgId];
         }
-        // debugPrint('🔀 [MERGE] Adding new: key=$firebaseId, id=${message.id}');
-        messageMap[firebaseId] = message;
+
+        if (existingKey != null) {
+          final existing = messageMap[existingKey]!;
+          final mergedStatus = _mergeStatus(existing.status, message.status);
+          // Replace with Firebase version (has firebaseId) but keep merged status
+          // and prefer the API id if it's a real server id
+          final merged = message.copyWith(
+            status: mergedStatus,
+            // Keep the real server id from the API-loaded message if available
+            id: (existing.id.isNotEmpty &&
+                    !existing.id.startsWith('temp_') &&
+                    existing.id != '0')
+                ? existing.id
+                : message.id,
+          );
+          // Re-key under firebaseId so future updates always find it
+          messageMap.remove(existingKey);
+          messageMap[firebaseId] = merged;
+          // Update msgId index to point to new key
+          if (message.msgId != null && message.msgId!.isNotEmpty) {
+            msgIdToKey[message.msgId!] = firebaseId;
+          }
+        } else {
+          messageMap[firebaseId] = message;
+        }
       } else if (message.id.startsWith('temp_')) {
-        // debugPrint('🔀 [MERGE] Keeping temp: ${message.id}');
         messageMap[message.id] = message;
       }
     }
 
-    // Keep items with non-zero id
+    // Build final deduplicated list
+    final firebaseIdToItem = <String, Message>{};
     for (final item in messageMap.values) {
       final firebaseId = item.firebaseId;
       if (firebaseId != null && firebaseId.isNotEmpty) {
         if (item.id != '0' && !item.id.startsWith('temp_')) {
           firebaseIdToItem[firebaseId] = item;
-          // debugPrint('🔀 [MERGE] Final: Added fbId=$firebaseId, id=${item.id}');
         } else if (!firebaseIdToItem.containsKey(firebaseId)) {
           firebaseIdToItem[firebaseId] = item;
-          // debugPrint('🔀 [MERGE] Final: Added fbId=$firebaseId (fallback), id=${item.id}');
         }
       } else if (item.id.startsWith('temp_')) {
         firebaseIdToItem[item.id] = item;
-        // debugPrint('🔀 [MERGE] Final: Kept temp=${item.id}');
+      } else {
+        // API-only messages with no firebaseId — keep under stable key
+        final stableKey = (item.msgId?.isNotEmpty == true && item.msgId != '0')
+            ? 'msgid_${item.msgId}'
+            : 'api_${item.id}';
+        firebaseIdToItem[stableKey] = item;
       }
     }
 
     final mergedList = firebaseIdToItem.values.toList();
     mergedList.sort((a, b) => b.timestamp.compareTo(a.timestamp));
-    // debugPrint('🔀 [MERGE] Complete: ${mergedList.length} total messages');
     return mergedList;
   }
 
@@ -1129,20 +1450,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     final position = _scrollController.position;
     final isAtBottom = position.pixels <= 100;
 
+    // Avoid setState just for scroll tracking — update flag directly to prevent rebuilds
     if (_isAtBottom != isAtBottom) {
-      setState(() {
-        _isAtBottom = isAtBottom;
-      });
+      _isAtBottom = isAtBottom;
+      // Only rebuild to show/hide the scroll-to-bottom FAB
+      setState(() {});
     }
 
-    // Load more messages when scrolling to top (in reverse list, top = maxScrollExtent)
+    // Load older messages when user scrolls to the top (reverse list: top = maxScrollExtent)
     final distanceFromTop = position.maxScrollExtent - position.pixels;
-    // Auto-load next page after viewing current batch of messages
-    // When user scrolls past 80% of loaded messages, fetch next page
     if (distanceFromTop <= 200 &&
         !_isLoadingOldMessages &&
         position.maxScrollExtent > 0) {
-      // Use cached _isAttendanceGroup flag
       if (_isAttendanceGroup == true) {
         _syncOldMessages();
       } else if (_hasMoreMessages) {
@@ -1199,12 +1518,84 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     }
   }
 
-  // Optimized: Mark message as read only once
+  /// Auto-marks incoming messages as read when user is actively viewing this chat.
+  /// Called immediately when a new message arrives via Firebase listener.
+  /// Prevents unread count from increasing for messages received while chat is open.
+  void _autoMarkIncomingMessageAsRead(Message message) {
+    if (_currentUserId == null) return;
+
+    final firebaseId = message.firebaseId ?? message.id;
+    final msgId = _isAttendanceGroup == true ? message.id : message.msgId;
+
+    debugPrint('📖 Auto-marking incoming message as read: $firebaseId $msgId');
+
+    // 1. Update Firebase status immediately
+    if (firebaseId.isNotEmpty && !firebaseId.startsWith('temp_')) {
+      FirebaseRealtimeService.updateMessageStatus(
+        widget.chatType,
+        widget.chatId,
+        firebaseId,
+        _currentUserId!,
+        'read',
+        currentUserId: _currentUserId,
+        otherUserId: _firebaseOtherUserId,
+        attendanceGroup: _isAttendanceGroup,
+        groupMembers: widget.chatType == 'group' && _user != null
+            ? _user!['member_list']
+            : null,
+      );
+
+      // 2. Update message status in local cache
+      _syncService.updateMessageInCache(
+        widget.chatId,
+        widget.chatType,
+        firebaseId,
+        {
+          'status': {
+            ...(message.status),
+            _currentUserId!: 'read',
+          }
+        },
+        currentUserId: _currentUserId,
+        userRole: _userRoleCache,
+        isAttendanceGroup: _isAttendanceGroup,
+      );
+    }
+
+    // 3. Call API to mark message as read
+    if (msgId != null && msgId.isNotEmpty && msgId != '0') {
+      try {
+        final messageId = int.parse(msgId);
+        if (messageId > 0) {
+          _apiService.markMessageAsRead(messageId);
+          _markAsReadApiCallCount++;
+          debugPrint('✅ API mark as read called for message: $messageId');
+        }
+      } catch (e) {
+        debugPrint('❌ Error marking message as read via API: $e');
+      }
+    }
+
+    // 4. Reset unread badge in chat list immediately — critical for admin users
+    // so the home screen badge clears as soon as the message is viewed.
+    ref.read(optimizedChatProvider.notifier).markAsRead(
+          widget.chatId,
+          widget.chatType,
+          _isAttendanceGroup == true,
+        );
+
+    // 5. Add to local tracking set to prevent re-processing
+    _markedAsReadMessages.add(firebaseId);
+  }
+
+  // Optimized: Mark message as read only once (used for messages already in list)
   void _markMessageAsRead(Message message) {
     final firebaseId = message.firebaseId ?? message.id;
     // Use cached _isAttendanceGroup flag
     final msgId = _isAttendanceGroup == true ? message.id : message.msgId;
-    final currentStatus = message.status[_currentUserId] ?? 'sent';
+    // Check both prefixed and raw key for backward compatibility
+    final currentStatus = (message.status[statusKey(_currentUserId!)] ??
+        message.status[_currentUserId])?.toString() ?? 'sent';
 
     // Update Firebase status
     if (firebaseId.isNotEmpty &&
@@ -1625,10 +2016,29 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           chatIdServer: msg.id.toString(),
           key: firebaseKey);
 
+      // Build per-user status map with prefixed keys to prevent Firebase array conversion
+      final Map<String, String> sentStatus;
+      if (widget.chatType == 'group') {
+        sentStatus = _currentUserId != null
+            ? {statusKey(_currentUserId!): 'sent'}
+            : {'default': 'sent'};
+      } else {
+        final resolvedOther = (_firebaseOtherUserId != null &&
+                _firebaseOtherUserId!.isNotEmpty &&
+                _firebaseOtherUserId != '0')
+            ? _firebaseOtherUserId!
+            : widget.chatId;
+        sentStatus = {
+          if (_currentUserId != null) statusKey(_currentUserId!): 'sent',
+          if (resolvedOther.isNotEmpty && resolvedOther != _currentUserId)
+            statusKey(resolvedOther): 'sent',
+        };
+      }
+
       return msg.copyWith(
         chatId: widget.chatId,
         firebaseId: firebaseKey,
-        status: {'default': 'sent'},
+        status: sentStatus,
         replyToMessage: message.replyToMessage,
       );
     } catch (e) {
@@ -1654,10 +2064,40 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   }
 
   Future<void> _handleFileSelection(File file, String messageType) async {
+    final tempId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
     try {
       if (!await _ensureInternetForSend()) return;
-      final uploadResponse = await _apiService.uploadFile(file, messageType);
-
+      // Add optimistic bubble immediately so user sees it uploading
+      final user = ref.read(authProvider).user!;
+      final previewMsg = Message(
+        id: tempId,
+        chatId: widget.chatId,
+        senderId: user.id,
+        senderName: user.name,
+        text: file.path.split('/').last,
+        type: messageType,
+        timestamp: DateTime.now(),
+        status: const {'default': 'sending'},
+        fileName: file.path.split('/').last,
+        fileSize: file.lengthSync(),
+      );
+      if (mounted)
+        setState(() {
+          _messages.insert(0, previewMsg);
+          _uploadProgress[tempId] = 0.0;
+        });
+      final uploadResponse = await _apiService.uploadFile(
+        file,
+        messageType,
+        onProgress: (sent, total) {
+          if (mounted && total > 0) {
+            setState(() => _uploadProgress[tempId] = sent / total);
+          }
+        },
+      );
+      if (mounted) setState(() => _uploadProgress.remove(tempId));
+      // Remove optimistic bubble — _sendMessage inserts the real one
+      if (mounted) setState(() => _messages.removeWhere((m) => m.id == tempId));
       await _sendMessage(
         type: messageType,
         fileUrl: uploadResponse.filePath,
@@ -1665,6 +2105,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         fileSize: uploadResponse.fileSize,
       );
     } catch (e) {
+      if (mounted)
+        setState(() {
+          _uploadProgress.remove(tempId);
+          _messages.removeWhere((m) => m.id == tempId);
+        });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Failed to send file')),
@@ -1674,14 +2119,45 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   }
 
   Future<void> _handleImageSelection(File file) async {
+    final tempId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
     try {
       if (!await _ensureInternetForSend()) return;
-      setState(() {
-        // Show loading state if needed
-      });
-
-      final uploadResponse = await _apiService.uploadFile(file, 'image');
-
+      final user = ref.read(authProvider).user!;
+      final previewMsg = Message(
+        id: tempId,
+        chatId: widget.chatId,
+        senderId: user.id,
+        senderName: user.name,
+        text: '',
+        type: 'image',
+        timestamp: DateTime.now(),
+        status: const {'default': 'sending'},
+        fileName: file.path.split('/').last,
+        fileSize: file.lengthSync(),
+        // store local path in fileUrl so bubble shows local preview
+        fileUrl: file.path,
+      );
+      if (mounted)
+        setState(() {
+          _messages.insert(0, previewMsg);
+          _uploadProgress[tempId] = 0.0;
+        });
+      // Compress before upload — reduces send time significantly
+      final compressed = await MediaCompressionService.compressImage(file);
+      final uploadResponse = await _apiService.uploadFile(
+        compressed,
+        'image',
+        onProgress: (sent, total) {
+          if (mounted && total > 0) {
+            setState(() => _uploadProgress[tempId] = sent / total);
+          }
+        },
+      );
+      if (mounted)
+        setState(() {
+          _uploadProgress.remove(tempId);
+          _messages.removeWhere((m) => m.id == tempId);
+        });
       await _sendMessage(
         type: 'image',
         fileUrl: uploadResponse.filePath,
@@ -1689,6 +2165,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         fileSize: uploadResponse.fileSize,
       );
     } catch (e) {
+      if (mounted)
+        setState(() {
+          _uploadProgress.remove(tempId);
+          _messages.removeWhere((m) => m.id == tempId);
+        });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Failed to send image')),
@@ -1776,9 +2257,44 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   }
 
   Future<void> _handleVideoSelection(File file) async {
+    final tempId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
     try {
       if (!await _ensureInternetForSend()) return;
-      final uploadResponse = await _apiService.uploadFile(file, 'video');
+      final user = ref.read(authProvider).user!;
+      final previewMsg = Message(
+        id: tempId,
+        chatId: widget.chatId,
+        senderId: user.id,
+        senderName: user.name,
+        text: '',
+        type: 'video',
+        timestamp: DateTime.now(),
+        status: const {'default': 'sending'},
+        fileName: file.path.split('/').last,
+        fileSize: file.lengthSync(),
+        fileUrl: file.path,
+      );
+      if (mounted)
+        setState(() {
+          _messages.insert(0, previewMsg);
+          _uploadProgress[tempId] = 0.0;
+        });
+      // Compress before upload — reduces send time ~60-70%
+      final compressed = await MediaCompressionService.compressVideo(file);
+      final uploadResponse = await _apiService.uploadFile(
+        compressed,
+        'video',
+        onProgress: (sent, total) {
+          if (mounted && total > 0) {
+            setState(() => _uploadProgress[tempId] = sent / total);
+          }
+        },
+      );
+      if (mounted)
+        setState(() {
+          _uploadProgress.remove(tempId);
+          _messages.removeWhere((m) => m.id == tempId);
+        });
       await _sendMessage(
         type: 'video',
         fileUrl: uploadResponse.filePath,
@@ -1786,6 +2302,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         fileSize: uploadResponse.fileSize,
       );
     } catch (e) {
+      if (mounted)
+        setState(() {
+          _uploadProgress.remove(tempId);
+          _messages.removeWhere((m) => m.id == tempId);
+        });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Failed to send video')),
@@ -1795,11 +2316,43 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   }
 
   Future<void> _handleDocumentSelection(File file) async {
+    final tempId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
     try {
       if (!await _ensureInternetForSend()) return;
       final extension = file.path.split('.').last.toLowerCase();
       final messageType = extension == 'pdf' ? 'pdf' : 'doc';
-      final uploadResponse = await _apiService.uploadFile(file, messageType);
+      final user = ref.read(authProvider).user!;
+      final previewMsg = Message(
+        id: tempId,
+        chatId: widget.chatId,
+        senderId: user.id,
+        senderName: user.name,
+        text: file.path.split('/').last,
+        type: messageType,
+        timestamp: DateTime.now(),
+        status: const {'default': 'sending'},
+        fileName: file.path.split('/').last,
+        fileSize: file.lengthSync(),
+      );
+      if (mounted)
+        setState(() {
+          _messages.insert(0, previewMsg);
+          _uploadProgress[tempId] = 0.0;
+        });
+      final uploadResponse = await _apiService.uploadFile(
+        file,
+        messageType,
+        onProgress: (sent, total) {
+          if (mounted && total > 0) {
+            setState(() => _uploadProgress[tempId] = sent / total);
+          }
+        },
+      );
+      if (mounted)
+        setState(() {
+          _uploadProgress.remove(tempId);
+          _messages.removeWhere((m) => m.id == tempId);
+        });
       await _sendMessage(
         type: messageType,
         fileUrl: uploadResponse.filePath,
@@ -1807,6 +2360,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         fileSize: uploadResponse.fileSize,
       );
     } catch (e) {
+      if (mounted)
+        setState(() {
+          _uploadProgress.remove(tempId);
+          _messages.removeWhere((m) => m.id == tempId);
+        });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Failed to send document')),
@@ -1909,15 +2467,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       return;
     }
     // Check internet before sending
-    final hasInternet =
-    await InternetChecker.hasInternet();
+    final hasInternet = await InternetChecker.hasInternet();
     debugPrint("hasInternet Role $hasInternet");
     if (!hasInternet) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text(
-                'No internet connection. Please check your connection.'),
+            content:
+                Text('No internet connection. Please check your connection.'),
             duration: Duration(seconds: 2),
           ),
         );
@@ -1946,15 +2503,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       return;
     }
     // Check internet before sending
-    final hasInternet =
-    await InternetChecker.hasInternet();
+    final hasInternet = await InternetChecker.hasInternet();
     debugPrint("hasInternet Role $hasInternet");
     if (!hasInternet) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text(
-                'No internet connection. Please check your connection.'),
+            content:
+                Text('No internet connection. Please check your connection.'),
             duration: Duration(seconds: 2),
           ),
         );
@@ -2140,6 +2696,21 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   Future<void> _downloadFile(Message message) async {
     debugPrint(
         '📄 Download started for: ${message.fileName}, type: ${message.type}');
+
+    // Guard: no download without internet — show a friendly message instead of a red error.
+    final online = await InternetChecker.hasInternet();
+    if (!online) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content:
+                Text('No internet connection. Please connect and try again.'),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+      return;
+    }
 
     // Check storage permission for Android
     if (Platform.isAndroid) {
@@ -2377,7 +2948,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         canPop: false,
         onPopInvokedWithResult: (didPop, result) {
           if (didPop) return;
-
+          _makeAsRead();
           if (Navigator.canPop(context)) {
             Navigator.pop(context, true);
           } else {
@@ -2390,6 +2961,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             leading: IconButton(
               icon: const Icon(Icons.arrow_back),
               onPressed: () {
+                _makeAsRead();
                 if (Navigator.canPop(context)) {
                   Navigator.pop(context, true);
                 } else {
@@ -2605,47 +3177,51 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                       if (_isAttendanceGroup == true && isFirstTime)
                         const Center(child: CircularProgressIndicator())
                       else
-                      ListView.builder(
-                        scrollCacheExtent: const ScrollCacheExtent.pixels(500),
-                        controller: _scrollController,
-                        padding: const EdgeInsets.all(8),
-                        reverse:
-                            true, // Cache more items for smoother scrolling
-                        itemCount:
-                            _messages.length + (_isLoadingOldMessages ? 1 : 0),
-                        itemBuilder: (context, index) {
-                          if (index == _messages.length) {
-                            return const Center(
-                              child: Padding(
-                                padding: EdgeInsets.all(16.0),
-                                child: CircularProgressIndicator(),
-                              ),
-                            );
-                          }
-
-                          final message = _messages[index];
-                          final isMe = message.senderId == user.id;
-
-                          // Mark messages as read ONCE when they first appear
-                          if (!isMe && _currentUserId != null) {
-                            final messageKey = message.firebaseId ?? message.id;
-                            if (!_markedAsReadMessages.contains(messageKey)) {
-                              _markedAsReadMessages.add(messageKey);
-                              _markMessageAsRead(message);
+                        ListView.builder(
+                          scrollCacheExtent:
+                              const ScrollCacheExtent.pixels(500),
+                          controller: _scrollController,
+                          padding: const EdgeInsets.all(8),
+                          reverse:
+                              true, // Cache more items for smoother scrolling
+                          itemCount: _messages.length +
+                              (_isLoadingOldMessages ? 1 : 0),
+                          itemBuilder: (context, index) {
+                            if (index == _messages.length) {
+                              return const Center(
+                                child: Padding(
+                                  padding: EdgeInsets.all(16.0),
+                                  child: CircularProgressIndicator(),
+                                ),
+                              );
                             }
-                          }
 
-                          if (message.type == 'text' && message.text.isEmpty) {
-                            return const SizedBox();
-                          }
+                            final message = _messages[index];
+                            final isMe = message.senderId == user.id;
 
-                          return AutoScrollTag(
-                              key: ValueKey(message.id),
-                              controller: _scrollController,
-                              index: index,
-                              child: _buildMessageBubble(message, isMe, index));
-                        },
-                      ),
+                            // Mark messages as read ONCE when they first appear
+                            if (!isMe && _currentUserId != null) {
+                              final messageKey =
+                                  message.firebaseId ?? message.id;
+                              if (!_markedAsReadMessages.contains(messageKey)) {
+                                _markedAsReadMessages.add(messageKey);
+                                _markMessageAsRead(message);
+                              }
+                            }
+
+                            if (message.type == 'text' &&
+                                message.text.isEmpty) {
+                              return const SizedBox();
+                            }
+
+                            return AutoScrollTag(
+                                key: ValueKey(message.id),
+                                controller: _scrollController,
+                                index: index,
+                                child:
+                                    _buildMessageBubble(message, isMe, index));
+                          },
+                        ),
 
                       // Typing indicator
                       if (_typingUsers.isNotEmpty)
@@ -2679,7 +3255,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                       child: CircularProgressIndicator(),
                     ),
                   )
-                else if (_isAttendanceGroup == true)
+                else if (widget.attendance_group == true)
                   Padding(
                     padding: const EdgeInsets.only(
                         right: 16.0, left: 16.0, top: 16, bottom: 8),
@@ -3062,22 +3638,25 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                 ],
               ),
             ),
-            if (replyType == 'image' && replyMessage.file_path != null)
+            if (replyType == 'image' &&
+                _imageSourceForMessage(replyMessage).isNotEmpty)
               Container(
                 width: 40,
                 height: 40,
                 margin: const EdgeInsets.only(left: 8),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(4),
-                  child: CachedNetworkImage(
-                    imageUrl:
-                        '${ApiService.baseUrl}/storage/${replyMessage.fileUrl!}',
+                  child: _buildResolvedImage(
+                    source: _imageSourceForMessage(replyMessage),
                     fit: BoxFit.cover,
-                    placeholder: (context, url) => Container(
+                    width: 40,
+                    height: 40,
+                    memCacheWidth: 80,
+                    placeholder: Container(
                       color: Colors.grey[300],
                       child: const Icon(Icons.image, size: 16),
                     ),
-                    errorWidget: (context, url, error) => Container(
+                    errorWidget: Container(
                       color: Colors.grey[300],
                       child: const Icon(Icons.image, size: 16),
                     ),
@@ -3200,7 +3779,169 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     );
   }
 
-  void _showFullScreenImage(String imageUrl) {
+  String _messageMediaPath(Message message) {
+    final fileUrl = message.fileUrl?.trim();
+    if (fileUrl != null && fileUrl.isNotEmpty) return fileUrl;
+
+    final filePath = message.file_path?.trim();
+    if (filePath != null && filePath.isNotEmpty) return filePath;
+
+    return '';
+  }
+
+  bool _isExistingLocalFile(String path) {
+    return path.startsWith('/') && File(path).existsSync();
+  }
+
+  String? _localCachedImagePath(Message message) {
+    final localCachedPath = message.metadata?['local_image_path']?.toString();
+    if (localCachedPath != null &&
+        localCachedPath.isNotEmpty &&
+        _isExistingLocalFile(localCachedPath)) {
+      return localCachedPath;
+    }
+
+    final mediaPath = _messageMediaPath(message);
+    if (mediaPath.isNotEmpty && _isExistingLocalFile(mediaPath)) {
+      return mediaPath;
+    }
+
+    return null;
+  }
+
+  String _remoteMediaUrl(String mediaPath) {
+    final path = mediaPath.trim();
+    if (path.isEmpty || path.startsWith('http')) return path;
+    if (path.startsWith('/storage/')) return '${ApiService.baseUrl}$path';
+    if (path.startsWith('storage/')) return '${ApiService.baseUrl}/$path';
+    if (path.startsWith('/')) return '${ApiService.baseUrl}$path';
+    return '${ApiService.baseUrl}/storage/$path';
+  }
+
+  String _imageSourceForMessage(Message message) {
+    final localPath = _localCachedImagePath(message);
+    if (localPath != null) return localPath;
+
+    final mediaPath = _messageMediaPath(message);
+    if (mediaPath.isEmpty) return '';
+
+    return _remoteMediaUrl(mediaPath);
+  }
+
+  Widget _buildResolvedImage({
+    required String source,
+    required BoxFit fit,
+    double? width,
+    double? height,
+    int? memCacheWidth,
+    Widget? placeholder,
+    Widget? errorWidget,
+  }) {
+    final fallback = errorWidget ??
+        Container(
+          width: width,
+          height: height,
+          color: Colors.grey[200],
+          child: const Center(
+            child: Icon(Icons.broken_image, size: 50, color: Colors.grey),
+          ),
+        );
+
+    if (source.isEmpty) return fallback;
+
+    if (_isExistingLocalFile(source)) {
+      return Image.file(
+        File(source),
+        fit: fit,
+        width: width,
+        height: height,
+        errorBuilder: (context, error, stackTrace) => fallback,
+      );
+    }
+
+    // Offline + no local file = show fallback immediately, no spinner
+    if (!_isOnline) return fallback;
+
+    return CachedNetworkImage(
+      imageUrl: source,
+      fit: fit,
+      width: width,
+      height: height,
+      memCacheWidth: memCacheWidth,
+      maxWidthDiskCache: memCacheWidth,
+      placeholder: (context, url) =>
+          placeholder ??
+          Container(
+            width: width,
+            height: height,
+            color: Colors.grey[200],
+            child: const Center(child: CircularProgressIndicator()),
+          ),
+      errorWidget: (context, url, error) => fallback,
+    );
+  }
+
+  /// Downloads image to local storage in background (Isolate-safe via compute).
+  /// Updates in-memory message + persists local_image_path to SQLite and Hive.
+  void _cacheImageInBackground(Message message) {
+    final msgKey = message.firebaseId ?? message.id;
+    if (msgKey.isEmpty || _cachingImages.contains(msgKey)) return;
+
+    // Resolve remote URL — skip if already a local file
+    final rawUrl = (message.fileUrl?.isNotEmpty == true
+            ? message.fileUrl
+            : message.file_path)
+        ?.trim();
+    if (rawUrl == null || rawUrl.isEmpty) return;
+    if (rawUrl.startsWith('/') && File(rawUrl).existsSync()) return;
+
+    final remoteUrl = _remoteMediaUrl(rawUrl.startsWith('http') ? rawUrl : rawUrl);
+    if (remoteUrl.isEmpty) return;
+
+    _cachingImages.add(msgKey);
+
+    // Run download in background — does NOT block UI thread
+    Future(() async {
+      try {
+        await _imageCacheService.initialize();
+        final localPath = await _imageCacheService.downloadAndCache(remoteUrl);
+        if (localPath == null || localPath == remoteUrl) return;
+        if (!File(localPath).existsSync()) return;
+
+        // Build updated metadata with local path
+        final meta = Map<String, dynamic>.from(message.metadata ?? {});
+        meta['local_image_path'] = localPath;
+        meta['remote_image_url'] = remoteUrl;
+        final updatedMessage = message.copyWith(metadata: meta);
+
+        // Persist to SQLite + Hive so it survives app restart
+        await _syncService.addMessageToCache(
+          widget.chatId,
+          widget.chatType,
+          updatedMessage,
+          currentUserId: _currentUserId,
+          userRole: _userRoleCache,
+          isAttendanceGroup: _isAttendanceGroup,
+        );
+
+        // Update in-memory list and rebuild only this message's widget
+        if (!mounted) return;
+        setState(() {
+          final idx = _messages.indexWhere((m) =>
+              (m.firebaseId ?? m.id) == msgKey);
+          if (idx != -1) _messages[idx] = updatedMessage;
+        });
+        debugPrint('🖼️ Image cached offline: $localPath');
+      } catch (e) {
+        debugPrint('⚠️ Background image cache failed: $e');
+      } finally {
+        _cachingImages.remove(msgKey);
+      }
+    });
+  }
+
+  void _showFullScreenImage(String imageSource) {
+    final source = imageSource.trim();
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (context) => Scaffold(
@@ -3212,18 +3953,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           body: SizedBox.expand(
             child: InteractiveViewer(
               child: Center(
-                child: CachedNetworkImage(
-                  imageUrl: imageUrl,
+                child: _buildResolvedImage(
+                  source: source,
                   fit: BoxFit.contain,
                   // Resize image for faster decoding
                   memCacheWidth: 400,
-                  maxWidthDiskCache: 400,
-                  placeholder: (context, url) => Center(
+                  placeholder: Center(
                     child: Container(
                       color: Colors.grey.shade300,
                     ),
                   ),
-                  errorWidget: (context, url, error) => const Center(
+                  errorWidget: const Center(
                     child: Icon(Icons.error, color: Colors.white, size: 50),
                   ),
                 ),
@@ -3236,10 +3976,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   }
 
   Widget _buildImageContent(Message message) {
-    final imageUrl = message.fileUrl ?? message.file_path ?? '';
-    final fullImageUrl = imageUrl.contains(ApiService.baseUrl)
-        ? imageUrl
-        : '${ApiService.baseUrl}/storage/$imageUrl';
+    final progress = _uploadProgress[message.id];
+    final isUploading = progress != null;
+    final imageSource = _imageSourceForMessage(message);
+
+    // If no local cache yet, trigger background download (online or offline queue)
+    if (message.metadata?['local_image_path'] == null ||
+        !_isExistingLocalFile(message.metadata!['local_image_path'].toString())) {
+      _cacheImageInBackground(message);
+    }
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3247,50 +3992,66 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         Stack(
           children: [
             GestureDetector(
-              onTap: () => _showFullScreenImage(fullImageUrl),
+              onTap: isUploading || imageSource.isEmpty
+                  ? null
+                  : () => _showFullScreenImage(imageSource),
               child: Container(
                 constraints:
                     const BoxConstraints(maxWidth: 250, maxHeight: 300),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(8),
-                  child: CachedNetworkImage(
-                    imageUrl: fullImageUrl,
+                  child: _buildResolvedImage(
+                    source: imageSource,
                     fit: BoxFit.cover,
+                    width: 250,
+                    height: 200,
                     memCacheWidth: 250,
-                    maxWidthDiskCache: 250,
-                    placeholder: (context, url) => Container(
-                      height: 200,
-                      color: Colors.grey[200],
-                      child: const Center(child: CircularProgressIndicator()),
+                  ),
+                ),
+              ),
+            ),
+            // WhatsApp-style upload progress overlay
+            if (isUploading)
+              Positioned.fill(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    color: Colors.black45,
+                    child: Center(
+                      child: _UploadProgressIndicator(progress: progress),
                     ),
-                    errorWidget: (context, error, stackTrace) => Container(
-                      height: 200,
-                      color: Colors.grey[200],
-                      child: const Center(
-                        child: Icon(Icons.broken_image,
-                            size: 50, color: Colors.grey),
+                  ),
+                ),
+              ),
+            if (!isUploading)
+              Positioned(
+                bottom: 4,
+                right: 4,
+                child: Material(
+                  // Dim the button when offline to signal it's unavailable
+                  color: _isOnline ? Colors.black54 : Colors.black26,
+                  borderRadius: BorderRadius.circular(20),
+                  child: InkWell(
+                    onTap: _isOnline ? () => _downloadFile(message) : () {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('No internet connection. Connect and try again.'),
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                    borderRadius: BorderRadius.circular(20),
+                    child: Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: Icon(
+                        _isOnline ? Icons.download : Icons.download_outlined,
+                        color: _isOnline ? Colors.white : Colors.white38,
+                        size: 20,
                       ),
                     ),
                   ),
                 ),
               ),
-            ),
-            Positioned(
-              bottom: 4,
-              right: 4,
-              child: Material(
-                color: Colors.black54,
-                borderRadius: BorderRadius.circular(20),
-                child: InkWell(
-                  onTap: () => _downloadFile(message),
-                  borderRadius: BorderRadius.circular(20),
-                  child: const Padding(
-                    padding: EdgeInsets.all(8),
-                    child: Icon(Icons.download, color: Colors.white, size: 20),
-                  ),
-                ),
-              ),
-            ),
           ],
         ),
       ],
@@ -3298,28 +4059,75 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   }
 
   Widget _buildVideoContent(Message message) {
+    final progress = _uploadProgress[message.id];
+    final isUploading = progress != null;
+    debugPrint("_buildVideoContent file_path fileUrl ${message.fileUrl}");
+    debugPrint("_buildVideoContent file_path ${message.file_path}");
     final videoUrl = message.fileUrl ?? message.file_path ?? '';
-    final fullVideoUrl = videoUrl.contains(ApiService.baseUrl)
+    final isLocalFile = videoUrl.startsWith('/');
+    final fullVideoUrl = isLocalFile || videoUrl.isEmpty
         ? videoUrl
-        : '${ApiService.baseUrl}/storage/$videoUrl';
+        : (videoUrl.contains(ApiService.baseUrl)
+            ? videoUrl
+            : '${ApiService.baseUrl}/storage/$videoUrl');
+
+    // Determine offline state from cached _isOnline (updated in _initializeChat)
+    final isOffline = !_isOnline;
 
     return GestureDetector(
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => VideoPlayerScreen(videoUrl: fullVideoUrl),
-          ),
-        );
-      },
+      onTap: isUploading
+          ? null
+          : () async {
+              // Check internet before navigating - show snackbar if offline
+              final hasInternet = await InternetChecker.hasInternet();
+              if (!mounted) return;
+              if (!hasInternet) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Row(
+                      children: [
+                        Icon(Icons.wifi_off_rounded, color: Colors.white),
+                        SizedBox(width: 10),
+                        Text('No internet connection'),
+                      ],
+                    ),
+                    behavior: SnackBarBehavior.floating,
+                    backgroundColor: Color(0xFF323232),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+                return;
+              }
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) =>
+                      VideoPlayerScreen(videoUrl: fullVideoUrl),
+                ),
+              );
+            },
       child: Container(
         constraints: const BoxConstraints(maxWidth: 250, maxHeight: 200),
         child: Stack(
           children: [
             ClipRRect(
               borderRadius: BorderRadius.circular(8),
-              child: VideoThumbnail(videoUrl: fullVideoUrl),
+              child: isLocalFile
+                  ? Container(
+                      width: 250,
+                      height: 200,
+                      color: Colors.black,
+                      child: const Center(
+                        child: Icon(Icons.videocam,
+                            color: Colors.white54, size: 48),
+                      ),
+                    )
+                  : VideoThumbnail(
+                      videoUrl: fullVideoUrl,
+                      isOffline: isOffline,
+                    ),
             ),
+            // Dark gradient overlay (always shown)
             Positioned.fill(
               child: Container(
                 decoration: BoxDecoration(
@@ -3329,23 +4137,35 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                     end: Alignment.bottomCenter,
                     colors: [
                       Colors.transparent,
-                      Colors.black.withValues(alpha: 0.3),
+                      Colors.black.withValues(alpha: 0.3)
                     ],
                   ),
                 ),
               ),
             ),
-            Center(
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: const BoxDecoration(
-                  color: Colors.black54,
-                  shape: BoxShape.circle,
+            // Upload progress overlay OR play button
+            if (isUploading)
+              Positioned.fill(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    color: Colors.black45,
+                    child: Center(
+                      child: _UploadProgressIndicator(progress: progress),
+                    ),
+                  ),
                 ),
-                child:
-                    const Icon(Icons.play_arrow, color: Colors.white, size: 40),
+              )
+            else
+              Center(
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: const BoxDecoration(
+                      color: Colors.black54, shape: BoxShape.circle),
+                  child: const Icon(Icons.play_arrow,
+                      color: Colors.white, size: 40),
+                ),
               ),
-            ),
           ],
         ),
       ),
@@ -3353,6 +4173,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   }
 
   Widget _buildDocumentContent(Message message) {
+    final progress = _uploadProgress[message.id];
+    final isUploading = progress != null;
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -3367,11 +4189,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
               color: _getFileColor(message.type),
               borderRadius: BorderRadius.circular(8),
             ),
-            child: Icon(
-              _getFileIcon(message.type),
-              color: Colors.white,
-              size: 24,
-            ),
+            child:
+                Icon(_getFileIcon(message.type), color: Colors.white, size: 24),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -3387,7 +4206,24 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                if (message.fileSize != null)
+                if (isUploading) ...[
+                  const SizedBox(height: 6),
+                  // Linear progress bar for documents
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: progress,
+                      minHeight: 4,
+                      backgroundColor: Colors.grey[300],
+                      color: const Color(0xFF1dab61),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${(progress * 100).toInt()}%',
+                    style: TextStyle(fontSize: 11, color: Colors.grey[600]),
+                  ),
+                ] else if (message.fileSize != null)
                   Text(
                     _formatFileSize(message.fileSize!),
                     style: TextStyle(fontSize: 12, color: Colors.grey[600]),
@@ -3395,11 +4231,26 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
               ],
             ),
           ),
-          IconButton(
-            icon: const Icon(Icons.download),
-            color: const Color(0xFF1dab61),
-            onPressed: () => _downloadFile(message),
-          ),
+          if (!isUploading)
+            IconButton(
+              icon: Icon(
+                Icons.download,
+                // Dim icon when offline
+                color: _isOnline ? const Color(0xFF1dab61) : Colors.grey[400],
+              ),
+              onPressed: _isOnline
+                  ? () => _downloadFile(message)
+                  : () {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('No internet connection. Connect and try again.'),
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+            )
+          else
+            const SizedBox(width: 48), // keep layout stable
         ],
       ),
     );
@@ -3426,43 +4277,97 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   Widget _buildMessageStatusIcon(Message message) {
     String statusToCheck;
-
+    debugPrint("AnkuhsRMMMMM Every ${message.toJson()} and  ${message.status.toString()} ");
     if (widget.chatType == 'group') {
-      // For group chat, check if all members have read
+      // For group chat, check if all members have read/delivered
       if (_user != null && _user!['member_list'] != null) {
         final members = _user!['member_list'] as List;
-        bool allRead = true;
-        bool anyDelivered = false;
+        // Exclude sender from the check
+        final otherMembers = members
+            .map((m) => m['id']?.toString() ?? m.toString())
+            .where((id) => id != _currentUserId)
+            .toList();
 
-        for (final member in members) {
-          final memberId = member['id']?.toString() ?? member.toString();
-          if (memberId != _currentUserId) {
-            final memberStatus = message.status[memberId] ?? 'sent';
+        if (otherMembers.isEmpty) {
+          statusToCheck = 'sent';
+        } else {
+          bool allRead = true;
+          bool anyDeliveredOrRead = false;
+
+          for (final memberId in otherMembers) {
+            // Check both prefixed and raw key for backward compatibility
+            final memberStatus = (message.status[statusKey(memberId)] ??
+                message.status[memberId]) ?? 'sent';
             if (memberStatus == 'read') {
-              anyDelivered = true;
+              anyDeliveredOrRead = true;
+              // allRead stays true only if all are 'read'
             } else if (memberStatus == 'delivered') {
               allRead = false;
-              anyDelivered = true;
+              anyDeliveredOrRead = true;
             } else {
+              // 'sent' or missing — not yet delivered
               allRead = false;
             }
           }
-        }
 
-        if (allRead && anyDelivered) {
-          statusToCheck = 'read';
-        } else if (anyDelivered) {
-          statusToCheck = 'delivered';
-        } else {
-          statusToCheck = 'sent';
+          if (allRead) {
+            statusToCheck = 'read';
+          } else if (anyDeliveredOrRead) {
+            statusToCheck = 'delivered';
+          } else {
+            statusToCheck = 'sent';
+          }
         }
+      } else {
+        // No member list yet — fall back to 'default' key or 'sent'
+        statusToCheck = message.status['default'] ?? 'sent';
+      }
+    } else {
+      // For private chat: scan all status entries for the other user's status.
+      // Keys are stored with 'u' prefix (e.g. 'u1', 'u3') to prevent Firebase
+      // array conversion. Also handle legacy unprefixed keys for old messages.
+      final otherUserId = _firebaseOtherUserId ?? widget.chatId;
+
+      final candidates = <String>[];
+
+      // 1. Prefixed key (new format)
+      final prefixedKey = statusKey(otherUserId);
+      final prefixedVal = message.status[prefixedKey];
+      if (prefixedVal != null) candidates.add(prefixedVal);
+
+      // 2. Raw key (legacy format, backward compat)
+      final rawVal = message.status[otherUserId];
+      if (rawVal != null && !candidates.contains(rawVal)) candidates.add(rawVal);
+
+      debugPrint("AnkuhsRMMMMM ${widget.chatId} and  ${message.status.toString()} ");
+      debugPrint("AnkuhsRMMMMM $_currentUserId and $candidates");
+
+      // 3. Scan all entries whose key is NOT the current user (handles any key format)
+      for (final entry in message.status.entries) {
+        final k = entry.key;
+        // Skip sender keys (both prefixed and raw)
+        if (k == _currentUserId || k == statusKey(_currentUserId ?? '')) continue;
+        if (k == 'default') continue;
+        if (!candidates.contains(entry.value)) candidates.add(entry.value);
+      }
+      debugPrint("AnkuhsRMMMMM $_currentUserId and $candidates");
+
+      // 4. Legacy 'default' key
+      final defaultStatus = message.status['default'];
+      if (defaultStatus != null && !candidates.contains(defaultStatus)) {
+        candidates.add(defaultStatus);
+      }
+
+      // Priority: read > delivered > sent
+      if (candidates.contains('read')) {
+        statusToCheck = 'read';
+      } else if (candidates.contains('delivered')) {
+        statusToCheck = 'delivered';
+      } else if (candidates.isNotEmpty) {
+        statusToCheck = candidates.first;
       } else {
         statusToCheck = 'sent';
       }
-    } else {
-      // For private chat, check the receiver's status only
-      final otherUserId = _firebaseOtherUserId;
-      statusToCheck = message.status[otherUserId] ?? 'sent';
     }
 
     switch (statusToCheck) {
@@ -3905,5 +4810,49 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         nextMessage.timestamp.month, nextMessage.timestamp.day);
 
     return !currentDate.isAtSameMomentAs(nextDate);
+  }
+}
+
+/// WhatsApp-style circular upload progress shown over image/video bubbles.
+class _UploadProgressIndicator extends StatelessWidget {
+  final double progress;
+  const _UploadProgressIndicator({required this.progress});
+
+  @override
+  Widget build(BuildContext context) {
+    final percent = (progress * 100).toInt();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: 56,
+          height: 56,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              CircularProgressIndicator(
+                value: progress,
+                strokeWidth: 3,
+                backgroundColor: Colors.white30,
+                color: Colors.white,
+              ),
+              Text(
+                '$percent%',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          'Uploading...',
+          style: TextStyle(color: Colors.white70, fontSize: 11),
+        ),
+      ],
+    );
   }
 }

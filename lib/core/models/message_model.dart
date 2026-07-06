@@ -9,7 +9,6 @@ T safeParse<T>(
   try {
     return parser();
   } catch (e, stack) {
-
     debugPrint('❌ Error parsing key: "$key"');
     debugPrint('Message ID: $messageId');
     debugPrint('Exception: $e');
@@ -65,7 +64,7 @@ class Message {
     this.profile_picture_url,
   });
 
-  static String resolveMessageId(Map<String, dynamic> json) {
+  static String resolveMessageId(Map<dynamic, dynamic> json) {
     final msgIdValue = json['msgId']?.toString().trim();
     final idValue = json['id']?.toString().trim();
 
@@ -97,24 +96,11 @@ class Message {
     return 'msg_${message.timestamp.millisecondsSinceEpoch}';
   }
 
-  factory Message.fromJson(Map<String, dynamic> json) {
-    // debugPrint("Ankush Message json Model inside ${json}");
+  factory Message.fromJson(Map<dynamic, dynamic> json) {
     String id = '';
-    Map<String, String> status;
-
-    if (json['status'] is String) {
-      status = {'default': json['status'].toString()};
-    } else if (json['status'] is Map) {
-      final raw = json['status'] as Map;
-      status = raw.map(
-        (key, value) => MapEntry(
-          key.toString(),
-          value.toString(),
-        ),
-      );
-    } else {
-      status = {};
-    }
+    // Parse status early so fallback path can use it
+    final Map<String, String> status = parseStatus(json['status']);
+    debugPrint("Ankush Value  fromJson status=$status");
     try {
       // Priority: msgId -> id, but skip empty/zero values.
       id = resolveMessageId(json);
@@ -338,7 +324,7 @@ class Message {
       text: data['text'] ?? '',
       type: data['type'] ?? 'text',
       timestamp: (data['timestamp'] as Timestamp?)?.toDate() ?? DateTime.now(),
-      status: Map<String, String>.from(data['status'] ?? {}),
+      status: parseStatus(data['status']),
       fileUrl: data['fileUrl'],
       fileName: data['fileName'],
       fileSize: data['fileSize'],
@@ -382,6 +368,7 @@ class Message {
       'msgId': msgId,
       'firebaseId': firebaseId,
       'chat_id': chatId,
+      'senderId': senderId,
       'sender_id': senderId,
       'senderName': senderName,
       'sender_name': senderName,
@@ -461,6 +448,7 @@ class Message {
     DateTime? timestamp,
     Map<String, String>? status,
     String? fileUrl,
+    String? file_path,
     String? firebaseId,
     String? fileName,
     int? fileSize,
@@ -482,6 +470,7 @@ class Message {
       timestamp: timestamp ?? this.timestamp,
       status: status ?? this.status,
       fileUrl: fileUrl ?? this.fileUrl,
+      file_path: file_path ?? this.file_path,
       firebaseId: firebaseId ?? this.firebaseId,
       fileName: fileName ?? this.fileName,
       fileSize: fileSize ?? this.fileSize,
@@ -496,13 +485,57 @@ class Message {
   }
 }
 
+/// Prefix a userId so Firebase never converts the status map to an array.
+/// Firebase converts maps with small consecutive integer keys (e.g. {1:x, 3:x})
+/// to arrays ([null,x,null,x]) when max_key < 2*count. Prefixing with 'u'
+/// makes keys non-numeric, preventing the conversion entirely.
+String statusKey(String userId) {
+  if (userId.isEmpty || userId == 'default') return userId;
+  // Already prefixed — idempotent
+  if (userId.startsWith('u') && int.tryParse(userId.substring(1)) != null) {
+    return userId;
+  }
+  // Only prefix purely numeric IDs
+  if (int.tryParse(userId) != null) return 'u$userId';
+  return userId;
+}
+
+/// Reverse of statusKey — strip the 'u' prefix to get the raw userId.
+String rawUserId(String key) {
+  if (key.startsWith('u') && int.tryParse(key.substring(1)) != null) {
+    return key.substring(1);
+  }
+  return key;
+}
+
 Map<String, String> parseStatus(dynamic value) {
   if (value is String) {
+    // Legacy: single string status stored as default key
     return {'default': value};
+  } else if (value is List) {
+    // Firebase converted the map to an array because keys were small integers
+    // e.g. {'1':'sent','3':'sent'} → [null,'sent',null,'sent']
+    // Reconstruct as prefixed map: index → 'u{index}' key
+    final result = <String, String>{};
+    for (var i = 0; i < value.length; i++) {
+      final v = value[i];
+      if (v == null) continue;
+      // Use prefixed key so future writes stay as map
+      result[statusKey(i.toString())] = v.toString();
+    }
+    return result;
   } else if (value is Map) {
-    return value.map(
-      (k, v) => MapEntry(k.toString(), v.toString()),
-    );
+    // Convert any Map — normalize keys to prefixed form and values to String
+    final result = <String, String>{};
+    for (final entry in value.entries) {
+      final k = entry.key?.toString();
+      final v = entry.value;
+      if (k == null || k.isEmpty) continue;
+      if (v == null) continue;
+      // Normalize key: prefix numeric IDs, keep 'default' and already-prefixed keys
+      result[statusKey(k)] = v.toString();
+    }
+    return result;
   }
   return {};
 }

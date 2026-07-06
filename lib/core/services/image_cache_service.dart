@@ -58,7 +58,8 @@ class ImageCacheService {
     }
   }
 
-  Future<String?> cacheLocalFileForUrl(String? imageUrl, File sourceFile) async {
+  Future<String?> cacheLocalFileForUrl(
+      String? imageUrl, File sourceFile) async {
     if (imageUrl == null || imageUrl.isEmpty) return null;
     if (!await sourceFile.exists()) return null;
 
@@ -92,7 +93,9 @@ class ImageCacheService {
   String? getCachedImagePath(String? imageUrl) {
     if (imageUrl == null || imageUrl.isEmpty) return null;
     if (_cacheDir == null) return null;
-    if (imageUrl.startsWith('/')) return imageUrl; // Already local path
+    if (imageUrl.startsWith('/') && File(imageUrl).existsSync()) {
+      return imageUrl; // Already local path
+    }
 
     final fileName = _getCacheFileName(imageUrl);
     final filePath = '$_cacheDir/$fileName';

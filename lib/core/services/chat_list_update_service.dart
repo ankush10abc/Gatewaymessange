@@ -22,7 +22,7 @@ class ChatListUpdateService {
     required String chatId,
     required String chatType,
     required String lastMessage,
-    required  bool attendanceGroup ,
+    required bool attendanceGroup,
     String? senderId,
     String? senderName,
   }) async {
@@ -31,12 +31,15 @@ class ChatListUpdateService {
       return;
     }
 
-    if (_pendingUpdates.contains(chatId)) {
-      debugPrint('⏱️ Skipping duplicate update for chat: $chatId');
+    // Include attendanceGroup + operation type so attendance updates never
+    // collide with regular sent-message dedup keys for the same chatId.
+    final dedupKey = 'sent_${chatType}_${chatId}_$attendanceGroup';
+    if (_pendingUpdates.contains(dedupKey)) {
+      debugPrint('⏱️ Skipping duplicate update for chat: $dedupKey');
       return;
     }
 
-    _pendingUpdates.add(chatId);
+    _pendingUpdates.add(dedupKey);
 
     try {
       await _ref!.read(optimizedChatProvider.notifier).updateChatWithMessage(
@@ -54,7 +57,7 @@ class ChatListUpdateService {
       debugPrint('❌ Error updating chat list: $e');
     } finally {
       Future.delayed(const Duration(milliseconds: 500), () {
-        _pendingUpdates.remove(chatId);
+        _pendingUpdates.remove(dedupKey);
       });
     }
   }
@@ -73,12 +76,14 @@ class ChatListUpdateService {
       return;
     }
 
-    if (_pendingUpdates.contains(chatId)) {
-      debugPrint('⏱️ Skipping duplicate update for chat: $chatId');
+    // Include attendanceGroup + operation type to avoid cross-contamination
+    final dedupKey = 'recv_${chatType}_${chatId}_$attendanceGroup';
+    if (_pendingUpdates.contains(dedupKey)) {
+      debugPrint('⏱️ Skipping duplicate update for chat: $dedupKey');
       return;
     }
 
-    _pendingUpdates.add(chatId);
+    _pendingUpdates.add(dedupKey);
 
     try {
       await _ref!.read(optimizedChatProvider.notifier).updateChatWithMessage(
@@ -96,7 +101,7 @@ class ChatListUpdateService {
       debugPrint('❌ Error updating chat list: $e');
     } finally {
       Future.delayed(const Duration(milliseconds: 500), () {
-        _pendingUpdates.remove(chatId);
+        _pendingUpdates.remove(dedupKey);
       });
     }
   }

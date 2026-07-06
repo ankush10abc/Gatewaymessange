@@ -267,6 +267,52 @@ class MessageDatabaseService {
     }
   }
 
+  /// Update per-user status entry in the stored JSON status map.
+  /// Used when Firebase delivers a status update (delivered/read) so the
+  /// cached message reflects the latest tick state without a full re-save.
+  Future<void> updateMessageUserStatus(
+      String firebaseId, String userId, String userStatus) async {
+    try {
+      final db = await database;
+      final rows = await db.query(
+        _messagesTable,
+        columns: ['id', 'status'],
+        where: 'firebase_id = ?',
+        whereArgs: [firebaseId],
+        limit: 1,
+      );
+      if (rows.isEmpty) return;
+      final existing = rows.first;
+      final statusMap = existing['status'] != null
+          ? Map<String, String>.from(
+              jsonDecode(existing['status'] as String) as Map)
+          : <String, String>{};
+      // Use prefixed key — matches how Firebase stores it (prevents array conversion)
+      final key = statusKey(userId);
+      // Only upgrade status, never downgrade (read > delivered > sent)
+      const priority = {'sent': 0, 'delivered': 1, 'read': 2};
+      // Check both prefixed and legacy raw key
+      final current = statusMap[key] ?? statusMap[userId] ?? 'sent';
+      if ((priority[userStatus] ?? 0) > (priority[current] ?? 0)) {
+        // Remove legacy raw key if present, write only prefixed key
+        statusMap.remove(userId);
+        statusMap[key] = userStatus;
+        await db.update(
+          _messagesTable,
+          {
+            'status': jsonEncode(statusMap),
+            'updated_at': DateTime.now().millisecondsSinceEpoch,
+          },
+          where: 'id = ?',
+          whereArgs: [existing['id']],
+        );
+        debugPrint('✅ SQLite status updated: $firebaseId[$key]=$userStatus');
+      }
+    } catch (e) {
+      debugPrint('❌ Error updating per-user status in SQLite: $e');
+    }
+  }
+
   // Mark message as read
   Future<void> markMessageAsRead(String messageId) async {
     try {
@@ -279,6 +325,31 @@ class MessageDatabaseService {
       );
     } catch (e) {
       debugPrint('❌ Error marking message as read: $e');
+    }
+  }
+
+  /// Returns all message IDs (id + firebase_id) that are already marked as read
+  /// for a given chat. Used to seed the in-memory read-tracking set on app restart
+  /// so already-read messages are never re-processed as unread.
+  Future<Set<String>> getReadMessageIds(String chatId, String chatType) async {
+    try {
+      final db = await database;
+      final rows = await db.rawQuery(
+        'SELECT id, firebase_id FROM $_messagesTable '
+        'WHERE chat_id = ? AND chat_type = ? AND is_read = 1',
+        [chatId, chatType],
+      );
+      final ids = <String>{};
+      for (final row in rows) {
+        final id = row['id']?.toString();
+        final fbId = row['firebase_id']?.toString();
+        if (id != null && id.isNotEmpty) ids.add(id);
+        if (fbId != null && fbId.isNotEmpty) ids.add(fbId);
+      }
+      return ids;
+    } catch (e) {
+      debugPrint('❌ Error fetching read message IDs: $e');
+      return {};
     }
   }
 
@@ -372,7 +443,7 @@ class MessageDatabaseService {
       file_path: map['file_path'] as String?,
       timestamp: DateTime.fromMillisecondsSinceEpoch(map['timestamp'] as int),
       status: map['status'] != null 
-        ? Map<String, String>.from(jsonDecode(map['status'] as String))
+        ? parseStatus(jsonDecode(map['status'] as String))
         : {'default': 'sent'},
       fileUrl: map['file_url'] as String?,
       firebaseId: map['firebase_id'] as String?,

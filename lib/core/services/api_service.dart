@@ -1,9 +1,11 @@
 import 'dart:io';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
-import '../models/user_model.dart';
-import '../models/message_model.dart';
+
 import '../models/chat_list_model.dart';
+import '../models/message_model.dart';
+import '../models/user_model.dart';
 
 class LoginRequest {
   final String mobile;
@@ -13,10 +15,10 @@ class LoginRequest {
   LoginRequest({required this.mobile, required this.password, this.fcmToken});
 
   Map<String, dynamic> toJson() => {
-    'mobile': mobile,
-    'password': password,
-    if (fcmToken != null) 'fcm_token': fcmToken,
-  };
+        'mobile': mobile,
+        'password': password,
+        if (fcmToken != null) 'fcm_token': fcmToken,
+      };
 }
 
 class AuthResponse {
@@ -26,9 +28,9 @@ class AuthResponse {
   AuthResponse({required this.token, required this.user});
 
   factory AuthResponse.fromJson(Map<String, dynamic> json) => AuthResponse(
-    token: json['token'],
-    user: User.fromJson(json['user']),
-  );
+        token: json['token'],
+        user: User.fromJson(json['user']),
+      );
 }
 
 class SendMessageRequest {
@@ -55,16 +57,16 @@ class SendMessageRequest {
   });
 
   Map<String, dynamic> toJson() => {
-    if (receiverId != null) 'receiver_id': receiverId,
-    if (groupId != null) 'group_id': groupId,
-    'message': message,
-    'message_type': messageType,
-    'firebase_message_id': firebaseMessageId,
-    if (replyToMessageId != null) 'reply_to_message_id': replyToMessageId,
-    if (filePath != null) 'file_path': filePath,
-    if (fileName != null) 'file_name': fileName,
-    if (fileSize != null) 'file_size': fileSize,
-  };
+        if (receiverId != null) 'receiver_id': receiverId,
+        if (groupId != null) 'group_id': groupId,
+        'message': message,
+        'message_type': messageType,
+        'firebase_message_id': firebaseMessageId,
+        if (replyToMessageId != null) 'reply_to_message_id': replyToMessageId,
+        if (filePath != null) 'file_path': filePath,
+        if (fileName != null) 'file_name': fileName,
+        if (fileSize != null) 'file_size': fileSize,
+      };
 }
 
 class PaginatedResponse<T> {
@@ -83,12 +85,13 @@ class PaginatedResponse<T> {
   factory PaginatedResponse.fromJson(
     Map<String, dynamic> json,
     T Function(Map<String, dynamic>) fromJsonT,
-  ) => PaginatedResponse(
-    data: (json['data'] as List).map((item) => fromJsonT(item)).toList(),
-    total: json['total'] ?? 0,
-    page: json['page'] ?? 1,
-    limit: json['limit'] ?? 50,
-  );
+  ) =>
+      PaginatedResponse(
+        data: (json['data'] as List).map((item) => fromJsonT(item)).toList(),
+        total: json['total'] ?? 0,
+        page: json['page'] ?? 1,
+        limit: json['limit'] ?? 50,
+      );
 }
 
 class FileUploadResponse {
@@ -104,12 +107,13 @@ class FileUploadResponse {
     required this.url,
   });
 
-  factory FileUploadResponse.fromJson(Map<String, dynamic> json) => FileUploadResponse(
-    filePath: json['file_path'],
-    fileName: json['file_name'],
-    fileSize: json['file_size'],
-    url: json['url'],
-  );
+  factory FileUploadResponse.fromJson(Map<String, dynamic> json) =>
+      FileUploadResponse(
+        filePath: json['file_path'],
+        fileName: json['file_name'],
+        fileSize: json['file_size'],
+        url: json['url'],
+      );
 }
 
 class ProfilePictureResponse {
@@ -118,10 +122,11 @@ class ProfilePictureResponse {
 
   ProfilePictureResponse({required this.profilePicture, required this.message});
 
-  factory ProfilePictureResponse.fromJson(Map<String, dynamic> json) => ProfilePictureResponse(
-    profilePicture: json['profile_picture'],
-    message: json['message'],
-  );
+  factory ProfilePictureResponse.fromJson(Map<String, dynamic> json) =>
+      ProfilePictureResponse(
+        profilePicture: json['profile_picture'],
+        message: json['message'],
+      );
 }
 
 class ApiService {
@@ -141,12 +146,12 @@ class ApiService {
     return AuthResponse.fromJson(response.data);
   }
 
-  Future<User> getCurrentUser() async {
-    debugPrint('API Call: GET /me');
-    final response = await _dio.get('/me');
-    debugPrint('API Response: GET /me - ${response.data}');
-    return User.fromJson(response.data);
-  }
+  // Future<User> getCurrentUser() async {
+  //   debugPrint('API Call: GET /me');
+  //   final response = await _dio.get('/me');
+  //   debugPrint('API Response: GET /me - ${response.data}');
+  //   return User.fromJson(response.data);
+  // }
 
   Future<void> logout() async {
     debugPrint('API Call: POST /logout');
@@ -158,14 +163,18 @@ class ApiService {
     debugPrint('API Call: GET $baseUrl/my-groups');
     final response = await _dio.get('/my-groups');
     debugPrint('API Response: GET $baseUrl/my-groups - ${response.data}');
-    return (response.data as List).map((item) => ChatModel.fromJson(item)).toList();
+    return (response.data as List)
+        .map((item) => ChatModel.fromJson(item))
+        .toList();
   }
 
   Future<List<ChatModel>> getChatList() async {
     debugPrint('API Call: GET $baseUrl/users/chat-list');
     final response = await _dio.get('/users/chat-list');
     debugPrint('API Response: GET $baseUrl/users/chat-list - ${response.data}');
-    return (response.data as List).map((item) => ChatModel.fromJson(item)).toList();
+    return (response.data as List)
+        .map((item) => ChatModel.fromJson(item))
+        .toList();
   }
 
   Future<List<User>> searchUsers(String query, {int page = 1}) async {
@@ -175,7 +184,7 @@ class ApiService {
       'page': page,
     });
     debugPrint('API Response: GET $baseUrl/users/search - ${response.data}');
-    
+
     // Handle response structure: {data: [...]} or [...]
     final List<dynamic> userList;
     if (response.data is Map && response.data['data'] != null) {
@@ -185,7 +194,7 @@ class ApiService {
     } else {
       return [];
     }
-    
+
     return userList.map((item) => User.fromJson(item)).toList();
   }
 
@@ -219,7 +228,8 @@ class ApiService {
       message: message,
       messageType: messageType,
       firebaseMessageId: DateTime.now().millisecondsSinceEpoch.toString(),
-      replyToMessageId: replyToMessageId != null ? int.tryParse(replyToMessageId) : null,
+      replyToMessageId:
+          replyToMessageId != null ? int.tryParse(replyToMessageId) : null,
       filePath: filePath,
       fileName: fileName,
     );
@@ -238,20 +248,24 @@ class ApiService {
     return FileUploadResponse.fromJson(response.data);
   }
 
-  Future<PaginatedResponse<Message>> getConversation(int userId, int page, int limit) async {
+  Future<PaginatedResponse<Message>> getConversation(
+      int userId, int page, int limit) async {
     final response = await _dio.get(
       '/messages/conversation/$userId',
       queryParameters: {'page': page, 'limit': limit},
     );
-    return PaginatedResponse.fromJson(response.data, (json) => Message.fromJson(json));
+    return PaginatedResponse.fromJson(
+        response.data, (json) => Message.fromJson(json));
   }
 
-  Future<PaginatedResponse<Message>> getGroupMessages(int groupId, int page, int limit) async {
+  Future<PaginatedResponse<Message>> getGroupMessages(
+      int groupId, int page, int limit) async {
     final response = await _dio.get(
       '/messages/group/$groupId',
       queryParameters: {'page': page, 'limit': limit},
     );
-    return PaginatedResponse.fromJson(response.data, (json) => Message.fromJson(json));
+    return PaginatedResponse.fromJson(
+        response.data, (json) => Message.fromJson(json));
   }
 
   Future<void> markMessageAsDelivered(int messageId) async {
@@ -277,7 +291,8 @@ class ApiService {
     return response.data;
   }
 
-  Future<ProfilePictureResponse> uploadProfilePicture(File profilePicture) async {
+  Future<ProfilePictureResponse> uploadProfilePicture(
+      File profilePicture) async {
     final formData = FormData.fromMap({
       'profile_picture': await MultipartFile.fromFile(profilePicture.path),
     });
@@ -302,7 +317,8 @@ class ApiService {
     await _dio.post('/firebase/delete-group', data: data);
   }
 
-  Future<Object?> batchSendMessages(List<Map<String, String>> testMessages) async {
-
+  Future<Object?> batchSendMessages(
+      List<Map<String, String>> testMessages) async {
+    return null;
   }
 }

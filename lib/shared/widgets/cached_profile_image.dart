@@ -1,10 +1,15 @@
 import 'dart:io';
+
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+
+import '../../core/services/api_service_simple.dart';
 
 class CachedProfileImage extends StatelessWidget {
   final String? imagePath;
   final double size;
   final String fallbackText;
+  static final Map<String, bool> _localFileExistsCache = {};
 
   const CachedProfileImage({
     super.key,
@@ -23,45 +28,62 @@ class CachedProfileImage extends StatelessWidget {
         color: Colors.grey[300],
       ),
       child: ClipOval(
-        child: _buildImage(),
+        child: _buildImage(context),
       ),
     );
   }
 
-  Widget _buildImage() {
-    if (imagePath == null || imagePath!.isEmpty) {
+  Widget _buildImage(BuildContext context) {
+    final path = imagePath?.trim();
+    if (path == null || path.isEmpty) {
       return _buildFallback();
     }
 
-    // Local file path
-    if (imagePath!.startsWith('/')) {
-      final file = File(imagePath!);
-      if (file.existsSync()) {
+    if (_isLocalFilePath(path)) {
+      final exists = _localFileExistsCache.putIfAbsent(
+        path,
+        () => File(path).existsSync(),
+      );
+      if (exists) {
         return Image.file(
-          file,
+          File(path),
           fit: BoxFit.cover,
           errorBuilder: (_, __, ___) => _buildFallback(),
         );
       }
+      return _buildFallback();
     }
 
-    // Remote URL
-    return Image.network(
-      imagePath!,
+    final cacheSize = (size * MediaQuery.of(context).devicePixelRatio).round();
+    return CachedNetworkImage(
+      imageUrl: _networkImageUrl(path),
       fit: BoxFit.cover,
-      errorBuilder: (_, __, ___) => _buildFallback(),
-      loadingBuilder: (context, child, loadingProgress) {
-        if (loadingProgress == null) return child;
-        return Center(
-          child: CircularProgressIndicator(
-            value: loadingProgress.expectedTotalBytes != null
-                ? loadingProgress.cumulativeBytesLoaded / loadingProgress.expectedTotalBytes!
-                : null,
-            strokeWidth: 2,
-          ),
-        );
-      },
+      width: size,
+      height: size,
+      memCacheWidth: cacheSize,
+      maxWidthDiskCache: cacheSize,
+      fadeInDuration: Duration.zero,
+      placeholder: (_, __) => Container(color: Colors.grey[300]),
+      errorWidget: (_, __, ___) => _buildFallback(),
     );
+  }
+
+  bool _isLocalFilePath(String path) {
+    if (!path.startsWith('/')) return false;
+    return !path.startsWith('/storage/');
+  }
+
+  String _networkImageUrl(String path) {
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return path;
+    }
+    if (path.startsWith('/storage/')) {
+      return '${ApiService.baseUrl}$path';
+    }
+    if (path.startsWith('storage/')) {
+      return '${ApiService.baseUrl}/$path';
+    }
+    return '${ApiService.baseUrl}/storage/$path';
   }
 
   Widget _buildFallback() {

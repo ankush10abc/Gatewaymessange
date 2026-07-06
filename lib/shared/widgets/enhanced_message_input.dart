@@ -265,9 +265,18 @@ class _EnhancedMessageInputState extends State<EnhancedMessageInput> {
                   label: 'Gallery',
                   color: Colors.purple,
                   onTap: () {
+                    debugPrint("Ankush banawade Gallery");
+                    debugPrint("Ankush banawade Gallery${widget.onPickImage}");
                     Navigator.pop(context);
                     if (widget.onPickImage != null) {
+
                       widget.onPickImage!();
+                    }else{
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                            content: Text(
+                                'You do not have permission to send attachments in this chat')),
+                      );
                     }
                   },
                 ),
@@ -277,8 +286,16 @@ class _EnhancedMessageInputState extends State<EnhancedMessageInput> {
                   color: Colors.pink,
                   onTap: () {
                     Navigator.pop(context);
+
                     if (widget.onPickCamera != null) {
+
                       widget.onPickCamera!();
+                    }else{
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                            content: Text(
+                                'You do not have permission to send attachments in this chat')),
+                      );
                     }
                   },
                 ),
@@ -290,6 +307,12 @@ class _EnhancedMessageInputState extends State<EnhancedMessageInput> {
                     Navigator.pop(context);
                     if (widget.onPickFile != null) {
                       widget.onPickFile!();
+                    }else{
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                            content: Text(
+                                'You do not have permission to send attachments in this chat')),
+                      );
                     }
                   },
                 ),

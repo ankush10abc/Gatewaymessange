@@ -8,14 +8,15 @@ import '../models/chat_model.dart';
 import '../models/message_model.dart';
 import '../utils/chat_utils.dart';
 import 'chat_list_update_service.dart';
+// statusKey() is defined in message_model.dart — imported above
 
 class FirebaseRealtimeService {
   static FirebaseFirestore get firestore => FirebaseFirestore.instance;
   static FirebaseDatabase get database => FirebaseDatabase.instance;
   static String TAG = "FirebaseRealtimeService";
-  static Map<String, dynamic>? _snapshotMap(dynamic value) {
+  static Map<dynamic, dynamic>? _snapshotMap(dynamic value) {
     if (value is! Map) return null;
-    return Map<String, dynamic>.from(value);
+    return Map<dynamic, dynamic>.from(value);
   }
 
   // Send message to Firebase Realtime Database
@@ -78,16 +79,36 @@ class FirebaseRealtimeService {
         otherUserId: otherUserId,
         chatType: chatType,
         attendanceGroup: attendanceGroup);
-    // debugPrint(
-    //     '$TAG Sending message to Firebase chat ID: ${message.chatId} currentUserId $currentUserId (original: $otherUserId)');
 
     final messageData = message.toJson();
-    messageData['timestamp'] =
-        ServerValue.timestamp; // Use server timestamp for ordering
+    messageData['timestamp'] = ServerValue.timestamp;
     messageData['id'] = key!;
     messageData['chatId'] = message.chatId;
-    messageData['status'] = {'default': 'sent'};
     messageData['msgId'] = chatIdServer;
+
+    // Preserve per-user status map — never overwrite with {'default': 'sent'}
+    // which would break double-tick tracking for private chats.
+    // Only set status if not already a per-user map.
+    final existingStatus = message.status;
+    final hasPerUserStatus = existingStatus.isNotEmpty &&
+        !existingStatus.containsKey('default');
+    if (!hasPerUserStatus) {
+      // Build per-user status map with prefixed keys to prevent Firebase array conversion
+      final statusMap = <String, String>{};
+      if (currentUserId != null && currentUserId.isNotEmpty) {
+        statusMap[statusKey(currentUserId)] = 'sent';
+      }
+      if (chatType != 'group' &&
+          otherUserId != null &&
+          otherUserId.isNotEmpty &&
+          otherUserId != '0') {
+        statusMap[statusKey(otherUserId)] = 'sent';
+      }
+      messageData['status'] =
+          statusMap.isNotEmpty ? statusMap : {'default': 'sent'};
+    } else {
+      messageData['status'] = existingStatus;
+    }
 
     await database.ref('chats/$chatId/messages/$key').update(messageData);
 
@@ -117,22 +138,28 @@ class FirebaseRealtimeService {
     messageData['chatId'] = message.chatId;
     messageData['msgId'] = chatIdServer ?? "0";
 
-    // Initialize status for both sender and receiver
+    // Initialize status for both sender and receiver.
+    // Use statusKey() prefix so Firebase never converts the map to an array
+    // (Firebase converts maps with small consecutive integer keys like {1:x,3:x}
+    // to arrays — prefixing with 'u' prevents this entirely).
     if (chatType == 'group') {
-      // For group, only sender has 'sent' status initially
       if (currentUserId != null) {
-        messageData['status'] = {currentUserId: 'sent'};
+        messageData['status'] = {statusKey(currentUserId): 'sent'};
       } else {
         messageData['status'] = {'default': 'sent'};
       }
     } else {
-      // For private chat, initialize both sender and receiver status
+      final resolvedOtherUserId =
+          (otherUserId != null && otherUserId.isNotEmpty && otherUserId != '0')
+              ? otherUserId
+              : message.chatId;
       final statusMap = <String, String>{};
-      if (currentUserId != null) {
-        statusMap[currentUserId] = 'sent';
+      if (currentUserId != null && currentUserId.isNotEmpty) {
+        statusMap[statusKey(currentUserId)] = 'sent';
       }
-      if (otherUserId != null && otherUserId != '0') {
-        statusMap[otherUserId] = 'sent';
+      if (resolvedOtherUserId.isNotEmpty &&
+          resolvedOtherUserId != currentUserId) {
+        statusMap[statusKey(resolvedOtherUserId)] = 'sent';
       }
       messageData['status'] =
           statusMap.isNotEmpty ? statusMap : {'default': 'sent'};
@@ -211,6 +238,8 @@ class FirebaseRealtimeService {
       if (data == null) return <Message>[];
 
       try {
+        debugPrint(
+            "$TAG ✅ Fiver 6 cached messages for messageData coming data $data");
         final messagesMap = _snapshotMap(data);
         if (messagesMap == null || messagesMap.isEmpty) {
           return <Message>[];
@@ -234,8 +263,8 @@ class FirebaseRealtimeService {
                         messageData['timestamp'])
                     .toIso8601String();
               }
-              // debugPrint(
-              //     "$TAG ✅ Loaded 6 cached messages for messageData $messageData");
+              debugPrint(
+                  "$TAG ✅ Fiver 6 cached messages for messageData $messageData");
               messages.add(Message.fromJson(messageData));
             }
           } catch (e) {
@@ -418,6 +447,57 @@ class FirebaseRealtimeService {
     });
   }
 
+  /// Resolves the actual Firebase node key for a message under [firebaseChatId].
+  ///
+  /// Strategy:
+  /// 1. Direct lookup by [messageId] as node key (works for both push keys and numeric IDs).
+  /// 2. Scan all nodes matching by firebaseId field stored inside the node.
+  /// 3. Scan all nodes matching by msgId / msg_id field.
+  ///
+  /// Returns the resolved node key, or null if not found.
+  static Future<String?> _resolveFirebaseNodeKey(
+    String firebaseChatId,
+    String messageId,
+  ) async {
+    if (messageId.isEmpty || messageId.startsWith('temp_')) return null;
+
+    // Step 1: direct lookup — fastest path, works for push keys and numeric IDs
+    try {
+      final directSnap = await database
+          .ref('chats/$firebaseChatId/messages/$messageId')
+          .get();
+      if (directSnap.exists) return messageId;
+    } catch (_) {}
+
+    // Step 2 & 3: scan all nodes for matching firebaseId or msgId field
+    try {
+      final allSnap =
+          await database.ref('chats/$firebaseChatId/messages').get();
+      if (!allSnap.exists || allSnap.value is! Map) return null;
+      final map = allSnap.value as Map;
+      for (final entry in map.entries) {
+        final val = entry.value;
+        if (val is! Map) continue;
+        // Match by firebaseId field stored inside the node
+        final storedFirebaseId = val['firebaseId']?.toString();
+        if (storedFirebaseId != null && storedFirebaseId == messageId) {
+          return entry.key.toString();
+        }
+        // Match by msgId / msg_id field
+        final storedMsgId =
+            val['msgId']?.toString() ?? val['msg_id']?.toString();
+        if (storedMsgId != null &&
+            storedMsgId.isNotEmpty &&
+            storedMsgId != '0' &&
+            storedMsgId == messageId) {
+          return entry.key.toString();
+        }
+      }
+    } catch (_) {}
+
+    return null;
+  }
+
   // Update message status (sent/delivered/read)
   static Future<void> updateMessageStatus(
     String chatType,
@@ -436,15 +516,23 @@ class FirebaseRealtimeService {
           currentUserId: currentUserId,
           otherUserId: otherUserId,
           attendanceGroup: attendanceGroup);
+      // Resolve the correct Firebase node key (handles both push keys and numeric server IDs)
+      final nodeKey = await _resolveFirebaseNodeKey(firebaseChatId, messageId);
+      if (nodeKey == null) {
+        debugPrint('$TAG ⚠️ updateMessageStatus: node not found for messageId=$messageId in $firebaseChatId');
+        return;
+      }
 
+      debugPrint('$TAG updateMessageStatus: $messageId → nodeKey=$nodeKey status=$status');
+      // Use prefixed key so the status node stays a Map in Firebase
       await database
-          .ref('chats/$firebaseChatId/messages/$messageId/status/$userId')
+          .ref('chats/$firebaseChatId/messages/$nodeKey/status/${statusKey(userId)}')
           .set(status);
 
       // For group chats, check if all members have read the message
       if (chatType == 'group' && status == 'read' && groupMembers != null) {
         final messageRef =
-            database.ref('chats/$firebaseChatId/messages/$messageId');
+            database.ref('chats/$firebaseChatId/messages/$nodeKey');
         final snapshot = await messageRef.get();
 
         if (snapshot.exists) {
@@ -457,7 +545,10 @@ class FirebaseRealtimeService {
             for (final member in groupMembers) {
               final memberId = member['id']?.toString() ?? member.toString();
               if (memberId != senderId) {
-                final memberStatus = statusMap[memberId]?.toString() ?? 'sent';
+                final statusStrMap = Map<String, dynamic>.from(statusMap);
+                // Check both prefixed and raw key for backward compatibility
+                final memberStatus = (statusStrMap[statusKey(memberId)] ??
+                    statusStrMap[memberId])?.toString() ?? 'sent';
                 if (memberStatus != 'read') {
                   allRead = false;
                   break;
@@ -467,7 +558,7 @@ class FirebaseRealtimeService {
 
             if (allRead) {
               await database
-                  .ref('chats/$firebaseChatId/messages/$messageId/allRead')
+                  .ref('chats/$firebaseChatId/messages/$nodeKey/allRead')
                   .set(true);
             }
           }
@@ -506,19 +597,28 @@ class FirebaseRealtimeService {
         debugPrint("$TAG Data Error marking messages as read ${messages.entries}");
         for (final entry in messages.entries) {
           if (entry.value is! Map) continue;
-          final messageData = entry.value as Map<dynamic, dynamic>;
+          final messageData = Map<String, dynamic>.from(entry.value as Map);
           final senderId = messageData['senderId']?.toString();
 
           if (senderId != userId) {
-            // Get current status to avoid unnecessary updates
-            final currentStatus = messageData['status']?[userId]?.toString();
+            // Cast status to Map<String,dynamic> so String key lookup works correctly.
+            // Firebase returns Map<dynamic,dynamic> — direct String key lookup returns null.
+            final rawStatus = messageData['status'];
+            final statusStrMap = rawStatus is Map
+                ? Map<String, dynamic>.from(rawStatus)
+                : null;
+            // Check both prefixed and raw key for backward compatibility
+            final currentStatus = (statusStrMap?[statusKey(userId)] ??
+                statusStrMap?[userId])?.toString();
             if (currentStatus != 'read') {
-              // debugPrint(
-              //     "$TAG Data Error marking messages as read ${firebaseChatId} key ${entry.key}");
               await database
-                  .ref(
-                      'chats/$firebaseChatId/messages/${entry.key}/status/$userId')
+                  .ref('chats/$firebaseChatId/messages/${entry.key}/status/${statusKey(userId)}')
                   .set('read');
+              if (messageData['msgId'] != null) {
+                await database
+                    .ref('chats/$firebaseChatId/messages/${messageData['msgId']}/status/${statusKey(userId)}')
+                    .set('read');
+              }
             }
 
             // For group chats, check if all members have read
@@ -538,8 +638,9 @@ class FirebaseRealtimeService {
                     final memberId =
                         member['id']?.toString() ?? member.toString();
                     if (memberId != senderId) {
-                      final memberStatus =
-                          statusMap[memberId]?.toString() ?? 'sent';
+                      // Check both prefixed and raw key for backward compatibility
+                      final memberStatus = (statusMap[statusKey(memberId)] ??
+                          statusMap[memberId])?.toString() ?? 'sent';
                       if (memberStatus != 'read') {
                         allRead = false;
                         break;
@@ -558,6 +659,11 @@ class FirebaseRealtimeService {
                       .ref(
                           'chats/$firebaseChatId/messages/${entry.key}/allRead')
                       .set(true);
+                  // await database
+                  //     .ref(
+                  //     'chats/$firebaseChatId/messages/${messageData['msgId']}/allRead')
+                  //     .set(true);
+
                 }
               }
             }

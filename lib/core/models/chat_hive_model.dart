@@ -103,6 +103,24 @@ class ChatHiveModel extends HiveObject {
         normalized == 'y';
   }
 
+  /// Parse last_read_at from either epoch-ms int (Firebase) or ISO string (API)
+  static DateTime? _parseLastReadAt(dynamic value) {
+    if (value == null) return null;
+    if (value is int && value > 0) {
+      return DateTime.fromMillisecondsSinceEpoch(value);
+    }
+    if (value is num && value > 0) {
+      return DateTime.fromMillisecondsSinceEpoch(value.toInt());
+    }
+    if (value is String && value.isNotEmpty) {
+      // Try epoch string first, then ISO
+      final ms = int.tryParse(value);
+      if (ms != null && ms > 0) return DateTime.fromMillisecondsSinceEpoch(ms);
+      return DateTime.tryParse(value);
+    }
+    return null;
+  }
+
   static String buildKey({
     required String id,
     required String type,
@@ -136,9 +154,7 @@ class ChatHiveModel extends HiveObject {
       actualRole: json['actual_role']?.toString(),
       createdAt: DateTime.tryParse(json['created_at'] ?? '') ?? DateTime.now(),
       updatedAt: DateTime.tryParse(json['updated_at'] ?? '') ?? DateTime.now(),
-      lastReadAt: json['last_read_at'] != null
-          ? DateTime.tryParse(json['last_read_at'])
-          : null,
+      lastReadAt: _parseLastReadAt(json['last_read_at']),
       memberCount: int.tryParse(json['member_count']?.toString() ?? ''),
       groupType: json['group_type']?.toString(),
       role: json['role']?.toString(),
@@ -187,7 +203,9 @@ class ChatHiveModel extends HiveObject {
         lastMessage != other.lastMessage ||
         name != other.name ||
         profilePicture != other.profilePicture ||
-        attendanceGroup != other.attendanceGroup;
+        attendanceGroup != other.attendanceGroup ||
+        // Include lastReadAt so saveChatsBatch always persists read state
+        lastReadAt != other.lastReadAt;
   }
 
   // Get image path (local first, then remote)

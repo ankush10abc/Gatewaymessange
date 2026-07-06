@@ -1,14 +1,16 @@
+import 'package:check_setting/core/utils/date_utils.dart';
 import 'package:dio/dio.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../app/app.dart';
 import '../../core/data/hive_chat_data_source.dart';
 import '../../core/models/user_model.dart';
 import '../../core/services/api_service_simple.dart';
 import '../../core/services/firebase_service.dart';
 import '../../core/services/simple_notification_service.dart';
+import '../../core/services/verification_check_controller.dart';
 import '../../core/storage/storage_service.dart';
 import '../../core/utils/internet_checker.dart';
 
@@ -60,7 +62,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
       // Always load cached credentials first
       final token = await _storage.getToken();
       final cachedUser = await _storage.getUser();
-      
+
       if (token != null && cachedUser != null) {
         _apiService.setAuthToken(token);
         // Set authenticated with cached data immediately
@@ -69,7 +71,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
           isAuthenticated: true,
           isLoading: false,
         );
-        
+
         // Then verify token with server if internet available
         bool hasinternet = await InternetChecker.hasInternet();
         if (hasinternet) {
@@ -79,8 +81,9 @@ class AuthNotifier extends StateNotifier<AuthState> {
             await FirebaseService.setUserOnline(user.id);
             await _apiService.setOnlineStatus();
           } on DioException catch (e) {
-            if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
-              await _handleAuthFailure();
+            if (e.response?.statusCode == 401 ||
+                e.response?.statusCode == 403) {
+              // await _handleAuthFailure();
             }
           } catch (_) {
             // Keep cached user on any other error
@@ -141,16 +144,38 @@ class AuthNotifier extends StateNotifier<AuthState> {
     }
   }
 
+  // MethodChannel: location foreground service notification
+  static const _locationChannel =
+      MethodChannel('com.company.gateway/location_service');
+
+  // Start both location + telemetry notifications on login
+  Future<void> _startAllServices() async {
+    try {
+      await _locationChannel.invokeMethod('startLocationService');
+    } catch (_) {}
+    await VerificationCheckController.start(); // Start telemetry notification
+  }
+
+  // Remove both location + telemetry notifications on logout / 401
+  Future<void> _stopAllServices() async {
+    try {
+      await _locationChannel.invokeMethod('stopLocationService');
+    } catch (_) {}
+    await VerificationCheckController.stop(); // Stop telemetry notification
+  }
+
   Future<void> _handleAuthFailure() async {
     final userId = state.user?.id;
-    await _storage.clearAll();
-    _apiService.clearAuthToken();
-    if (userId != null) await HiveChatDataSource().clearForUser(userId);
-    state = AuthState();
+    // await _stopAllServices(); // Remove all notifications on forced logout
+    // await _storage.clearAll();
+    // _apiService.clearAuthToken();
+    // if (userId != null) await HiveChatDataSource().clearForUser(userId);
+    // state = AuthState();
   }
 
   void _handle401Unauthorized() async {
     final userId = state.user?.id;
+    await _stopAllServices(); // Remove all notifications on 401
     await _storage.clearAll();
     _apiService.clearAuthToken();
     if (userId != null) await HiveChatDataSource().clearForUser(userId);
@@ -162,11 +187,12 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
     try {
       // Get FCM token
-      String? fcmToken;
+      String? fcmToken = 'No token  received';
       try {
         fcmToken = await FirebaseMessaging.instance.getToken();
         debugPrint('FCM Token: $fcmToken');
       } catch (e) {
+        fcmToken = await FirebaseMessaging.instance.getToken();
         debugPrint('Failed to get FCM token: $e');
       }
 
@@ -190,14 +216,18 @@ class AuthNotifier extends StateNotifier<AuthState> {
       await FirebaseService.setUserOnline(response.user.id);
       await _apiService.setOnlineStatus();
 
+      // Start location + telemetry foreground services — shows persistent background notifications
+      await _startAllServices();
+
       // Initialize simple notifications
       await SimpleNotificationService.initialize();
 
       return true;
     } catch (e) {
       debugPrint('Login error in auth provider: $e');
-      
-      String errorMessage = 'Login failed';
+
+      String errorMessage = 'Login failed ';
+      AppDateUtils.show('The provided credentials are incorrect');
 
       // ScaffoldMessenger.of(navigatorKey.currentContext!).showSnackBar(
       //   SnackBar(
@@ -253,7 +283,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
           errorMessage = e.response?.data?['message'] ?? 'Login failed';
         }
       } else {
-        errorMessage = e.toString();
+        errorMessage = "Something went wrong";
       }
 
       state = state.copyWith(
@@ -275,6 +305,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
       }
 
       await _apiService.logout();
+      await _stopAllServices(); // Remove all background notifications on logout
       await _storage.clearAll();
 
       // Clear this user's Hive chat cache so the next user never sees stale data
@@ -284,6 +315,7 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
       state = AuthState();
     } catch (e) {
+      await _stopAllServices(); // Ensure all notifications removed even on error
       await _storage.clearAll();
       if (loggedOutUserId != null) {
         await HiveChatDataSource().clearForUser(loggedOutUserId);
