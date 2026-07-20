@@ -189,7 +189,7 @@ class _SplashScreenState extends ConsumerState<SplashScreen>
 
                     // Subtitle
                     const Text(
-                      'Parent Communication App',
+                      'Parent Communication App ',
                       style: TextStyle(
                         color: Colors.white70,
                         fontSize: 16,

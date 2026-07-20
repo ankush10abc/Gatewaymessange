@@ -146,7 +146,7 @@ class MessageNotifier extends StateNotifier<MessageState> {
 
   Future<void> markMessageAsRead(int messageId) async {
     try {
-      await _apiService.markMessageAsRead(messageId);
+      // await _apiService.markMessageAsRead(messageId);
     } catch (e) {
       // Ignore errors for read receipts
     }

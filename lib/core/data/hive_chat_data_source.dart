@@ -193,10 +193,6 @@ class HiveChatDataSource {
         int resolvedUnread;
         final localReadAt = existing.lastReadAt;
         final apiMsgTime = chat.lastMessageTime ?? chat.updatedAt;
-        // lastReadAt >= lastMessageTime is the sole source of truth for read state.
-        // Do NOT also require existing.unreadCount == 0 — that condition caused
-        // the badge to resurrect when the API returned a stale non-zero count
-        // after the user had already read the chat.
         if (localReadAt != null && !localReadAt.isBefore(apiMsgTime)) {
           // User already read up to this point — keep 0
           resolvedUnread = 0;

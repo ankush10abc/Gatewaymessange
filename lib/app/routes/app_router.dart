@@ -33,13 +33,13 @@ class GoRouterNotifier extends StateNotifier<GoRouter> {
 
   static GoRouter _createRouter(Ref ref) {
     return GoRouter(
-      initialLocation: '/splash',
+       initialLocation: '/splash',
       redirect: (context, state) {
         final authState = ref.read(authProvider);
 
         // If auth is still loading, stay on splash
         if (authState.isLoading) {
-          return state.fullPath == '/splash' ? null : '/splash';
+        ///  return state.fullPath == '/splash' ? null : '/splash';
         }
 
         final isLoggedIn = authState.isAuthenticated;
@@ -51,9 +51,15 @@ class GoRouterNotifier extends StateNotifier<GoRouter> {
           return '/login';
         }
 
-        // If logged in, redirect to home (except if already on a protected route)
-        if (isLoggedIn && (isOnLogin || isOnSplash)) {
-          return '/home';
+        // If logged in and on login page, redirect to splash so prefetch runs
+        if (isLoggedIn && isOnLogin) {
+          return '/splash';
+        }
+
+        // Splash handles its own navigation to /home after animation + prefetch
+        // Never redirect away from splash — let _navigateAfterDelay() do it
+        if (isOnSplash) {
+          return null;
         }
 
         return null;

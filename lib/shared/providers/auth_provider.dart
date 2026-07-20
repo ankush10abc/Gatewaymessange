@@ -1,4 +1,4 @@
-import 'package:check_setting/core/utils/date_utils.dart';
+import 'package:check_setting/app/app.dart' show navigatorKey;
 import 'package:dio/dio.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
@@ -50,10 +50,16 @@ class AuthNotifier extends StateNotifier<AuthState> {
     final dio = Dio();
     _apiService = ApiService(dio);
 
-    // Set 401 handler
+    // Case 2 / generic 401: ping succeeded + retry still 401 → confirmed logout
     ApiService.onUnauthorized = () async {
       bool hasinternet = await InternetChecker.hasInternet();
       if (hasinternet) _handle401Unauthorized();
+    };
+
+    // Case 1: session_displaced — intentional server-side session kill.
+    // Clear token, show dialog, navigate to login.
+    ApiService.onSessionDisplaced = () async {
+      await _handleSessionDisplaced();
     };
 
     // Defer auth check to prevent initialization errors
@@ -182,35 +188,73 @@ class AuthNotifier extends StateNotifier<AuthState> {
     state = AuthState();
   }
 
-  Future<bool> login(String mobile, String password) async {
+  /// Case 1: session_displaced — user logged in on another device.
+  /// Show an informational dialog, then clear state and navigate to login.
+  Future<void> _handleSessionDisplaced() async {
+    final userId = state.user?.id;
+    await _stopAllServices();
+    await _storage.clearAll();
+    _apiService.clearAuthToken();
+    if (userId != null) await HiveChatDataSource().clearForUser(userId);
+    state = AuthState();
+
+    // Show dialog using the global navigator key so we don’t need a BuildContext
+    final ctx = navigatorKey.currentContext;
+    if (ctx != null && ctx.mounted) {
+      await showDialog<void>(
+        context: ctx,
+        barrierDismissible: false,
+        builder: (_) => AlertDialog(
+          title: const Text('Logged Out'),
+          content: const Text(
+            'You have been logged in on another device. '
+            'This session has been ended.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx, rootNavigator: true).pop(),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
+  Future<bool> login(String mobile, String password, [var fcmToken]) async {
     state = state.copyWith(isLoading: true, error: null);
 
     try {
-      // Get FCM token
-      String? fcmToken = 'No token  received';
+      // Always fetch a fresh FCM token — never rely on the passed value
+      // which may be empty if Firebase wasn't ready when the login screen loaded.
+      String fcmToken1 = fcmToken == null || fcmToken.toString().isEmpty ? "" : fcmToken;
       try {
-        fcmToken = await FirebaseMessaging.instance.getToken();
-        debugPrint('FCM Token: $fcmToken');
+        fcmToken1 = await FirebaseMessaging.instance.getToken() ?? '';
+        debugPrint('FCM Token: $fcmToken1');
       } catch (e) {
-        fcmToken = await FirebaseMessaging.instance.getToken();
         debugPrint('Failed to get FCM token: $e');
       }
 
+      // Clear any stale auth token before login so it is never injected
+      // into the login request headers, which causes PHP to reject valid credentials.
+      _apiService.clearAuthToken();
+
       final request =
-          LoginRequest(mobile: mobile, password: password, fcmToken: fcmToken);
+          LoginRequest(mobile: mobile, password: password, fcmToken: fcmToken1);
       final response = await _apiService.login(request);
-      debugPrint("Ankush Banawade ${response.user.role}");
-      debugPrint("Ankush Banawade ${response.token}");
+
       // Store credentials securely
       await _storage.saveToken(response.token);
       await _storage.saveUser(response.user);
-
+      debugPrint("Ankush Banawade ${response.user.role}");
+      debugPrint("Ankush Banawade ${response.token}");
       state = state.copyWith(
         user: response.user,
         isAuthenticated: true,
         isLoading: false,
         error: null,
       );
+
 
       // Set user online in Firebase and API
       await FirebaseService.setUserOnline(response.user.id);
@@ -226,69 +270,18 @@ class AuthNotifier extends StateNotifier<AuthState> {
     } catch (e) {
       debugPrint('Login error in auth provider: $e');
 
-      String errorMessage = 'Login failed ';
-      AppDateUtils.show('The provided credentials are incorrect');
-
-      // ScaffoldMessenger.of(navigatorKey.currentContext!).showSnackBar(
-      //   SnackBar(
-      //     content: Row(
-      //       children: [
-      //         const Icon(Icons.close, color: Colors.white),
-      //         const SizedBox(width: 12),
-      //         const Text(
-      //           'The provided credentials are incorrect',
-      //           style: TextStyle(
-      //             color: Colors.white,
-      //             fontSize: 15,
-      //             fontWeight: FontWeight.w500,
-      //           ),
-      //         ),
-      //       ],
-      //     ),
-      //     backgroundColor: Colors.green[700],
-      //     behavior: SnackBarBehavior.floating,
-      //     margin: const EdgeInsets.all(16),
-      //     duration: const Duration(seconds: 2),
-      //     shape: RoundedRectangleBorder(
-      //       borderRadius: BorderRadius.circular(12),
-      //     ),
-      //     elevation: 6,
-      //   ),
-      // );
-      // Handle Exception thrown from API service
+      // api_service_simple.login() always throws Exception(message) with the
+      // server's human-readable message already extracted. Strip the prefix.
+      String errorMessage = 'Login failed';
       if (e is Exception) {
-        final exceptionMsg = e.toString();
-        // Remove "Exception: " prefix if present
-        if (exceptionMsg.startsWith('Exception: ')) {
-          errorMessage = exceptionMsg.substring(11);
-        } else {
-          errorMessage = exceptionMsg;
-        }
-      } else if (e is DioException) {
-        if (e.response?.statusCode == 422) {
-          // Handle validation errors
-          final data = e.response?.data;
-          if (data is Map<String, dynamic>) {
-            if (data['message'] != null) {
-              errorMessage = data['message'];
-            } else if (data['errors'] != null) {
-              final errors = data['errors'] as Map<String, dynamic>;
-              final firstError = errors.values.first;
-              if (firstError is List && firstError.isNotEmpty) {
-                errorMessage = firstError.first.toString();
-              }
-            }
-          }
-        } else {
-          errorMessage = e.response?.data?['message'] ?? 'Login failed';
-        }
-      } else {
-        errorMessage = "Something went wrong";
+        final msg = e.toString();
+        errorMessage = msg.startsWith('Exception: ') ? msg.substring(11) : msg;
       }
 
       state = state.copyWith(
-        error: errorMessage,
+        isAuthenticated: false,
         isLoading: false,
+        error: errorMessage,
       );
       return false;
     }

@@ -17,6 +17,7 @@ import 'core/services/notification_handler.dart';
 import 'core/services/offline_queue_service.dart';
 import 'core/services/sync_service.dart';
 import 'core/services/update_service.dart';
+import 'core/utils/helpers.dart';
 
 // Top-level background message handler
 @pragma('vm:entry-point')
@@ -152,6 +153,6 @@ class _MyAppState extends ConsumerState<MyApp> {
 
   @override
   Widget build(BuildContext context) {
-    return GatewayMessengerApp();
+    return  GatewayMessengerApp();
   }
 }

@@ -9,7 +9,6 @@ import '../models/chat_list_model.dart';
 import '../models/message_model.dart';
 import '../models/user_model.dart';
 import '../storage/storage_service.dart';
-import '../utils/internet_checker.dart';
 
 // Request/Response Models
 class LoginRequest {
@@ -286,9 +285,15 @@ class ApiService {
   final Dio _dio;
   static const String baseUrl = 'https://gatewayreports.in';
   static void Function()? onUnauthorized;
+  // Called ONLY on confirmed session_displaced — triggers dialog + navigate to login
+  static void Function()? onSessionDisplaced;
   static BuildContext? _context;
 
   static int messageCount = 15;
+
+  // Tracks whether a session_displaced logout is already in progress so we
+  // never show the dialog twice if multiple requests fail simultaneously.
+  static bool _sessionDisplacedHandled = false;
 
   static void setContext(BuildContext context) {
     _context = context;
@@ -301,34 +306,40 @@ class ApiService {
     _dio.options.sendTimeout = const Duration(seconds: 60);
 
     // Set default headers for all requests
-    _dio.options.headers['Accept'] = 'application/json';
-    _dio.options.headers['Content-Type'] = 'application/json';
+    // _dio.options.headers['Accept'] = 'application/json';
+    // _dio.options.headers['Content-Type'] = 'application/json';
 
     _dio.interceptors.add(InterceptorsWrapper(
       onRequest: (options, handler) async {
         // Ensure headers are always present on every request
         options.headers['Accept'] = 'application/json';
-        final StorageService _storage = StorageService();
-        final token = await _storage.getToken();
-        // debugPrint("API Request Headers: $token");
-        if (token != null && token.isNotEmpty) {
-          _dio.options.headers['Authorization'] = 'Bearer $token';
+        options.headers['Content-Type'] = 'application/json';
+
+        // Never inject Authorization into the login endpoint —
+        // a stale token in storage would cause PHP to reject valid credentials.
+        final isLoginRequest = options.path.contains('/api/login');
+        if (!isLoginRequest) {
+          final StorageService storage = StorageService();
+          final token = await storage.getToken();
+          if (token != null && token.isNotEmpty) {
+            options.headers['Authorization'] = 'Bearer $token';
+            _dio.options.headers['Authorization'] = 'Bearer $token';
+          }
+        } else {
+          // Explicitly remove any stale Authorization from this specific request
+          options.headers.remove('Authorization');
         }
 
         if (options.data is! FormData) {
           options.headers['Content-Type'] = 'application/json';
         }
         // Remove content-length — Dio computes it automatically from the body
-        // but some servers reject requests when it appears alongside
-        // Transfer-Encoding or chunked payloads. Strip it so only
-        // Accept, Content-Type, and Authorization are ever sent.
         options.headers.remove('content-length');
         options.headers.remove('Content-Length');
-        // debugPrint('API Request Headers: ${options.headers}');
         handler.next(options);
       },
       onError: (error, handler) async {
-        // Log detailed error information with URL and request details
+        // ── Structured error logging ──────────────────────────────────────────
         debugPrint('\n========================================');
         debugPrint('❌ API ERROR');
         debugPrint('========================================');
@@ -344,18 +355,184 @@ class ApiService {
             debugPrint('Request Data: ${error.requestOptions.data}');
           }
         }
-
         if (error.response?.data != null) {
           debugPrint('Response: ${error.response?.data}');
         }
-
         debugPrint('Error Type: ${error.type}');
         debugPrint('Error Message: ${error.message}');
         debugPrint('========================================\n');
 
+        // ── Never handle errors for the ping or login endpoints ────────────────
+        // Login errors must reach the login() catch block so the server's
+        // human-readable message (e.g. "The provided credentials are incorrect.")
+        // is extracted and shown to the user. Interceptor retry/logout logic
+        // must never interfere with login failures.
+        final path = error.requestOptions.path;
+        if (path.contains('/api/ping') || path.contains('/api/login')) {
+          return handler.next(error);
+        }
+
+        final statusCode = error.response?.statusCode;
+
+        // ── Parse JSON error body (ALWAYS parse before deciding action) ───────
+        String? errorCode;
+        try {
+          final data = error.response?.data;
+          if (data is Map) {
+            errorCode = data['error']?.toString();
+          }
+        } catch (_) {}
+
+        // ── Case 1: HTTP 401 + error == "session_displaced" ───────────────────
+        // The user logged in on another device; this session was intentionally killed.
+        // Clear token, show dialog, navigate to login. Never retry.
+        if (statusCode == 401 && errorCode == 'session_displaced') {
+          if (!_sessionDisplacedHandled) {
+            _sessionDisplacedHandled = true;
+            await _handleSessionDisplaced();
+
+          }
+          return handler.next(error);
+        }
+
+        // ── Case 2: HTTP 401 with any other error code (token_invalid, etc.) ──
+        // Temporary server-side auth failure — ping first, then retry once.
+        // NEVER auto-logout without a successful ping + confirmed retry failure.
+        if (statusCode == 401) {
+          final pingOk = await _pingServer();
+          if (pingOk == false) {
+            // Server is down — do NOT logout, show connection error
+            // _showConnectionError('Connection error, retrying...$pingOk');
+            await Future.delayed(const Duration(seconds: 3));
+            try {
+              final retried = await _retryRequest(error.requestOptions);
+              return handler.resolve(retried);
+            } catch (_) {
+              return handler.next(error);
+            }
+          }
+
+          // Ping succeeded — retry the original request once with the same token
+          try {
+            final retried = await _retryRequest(error.requestOptions);
+            return handler.resolve(retried);
+          } on DioException catch (retryError) {
+            // Retry still returned 401 → confirmed invalid token → logout
+            if (retryError.response?.statusCode == 401) {
+              await _handle401Error();
+            }
+            return handler.next(retryError);
+          }
+        }
+
+        // ── Case 3 & 4: HTTP 503 / 500 / network timeout / connection refused ─
+        // Server temporarily overloaded or DB down.
+        // NEVER logout. Retry up to 3 times with 3-second delay.
+        final isServerError = statusCode == 503 || statusCode == 500;
+        final isNetworkError = error.type == DioExceptionType.connectionTimeout ||
+            error.type == DioExceptionType.receiveTimeout ||
+            error.type == DioExceptionType.sendTimeout ||
+            error.type == DioExceptionType.connectionError ||
+            error.type == DioExceptionType.unknown;
+
+        if (isServerError || isNetworkError) {
+          final pingOk = await _pingServer();
+          if (pingOk == false) {
+            // Server is down — do NOT logout, show connection error
+            // _showConnectionError('Connection error, retrying...$pingOk');
+          }          // _showConnectionError('Connection error, retrying...');
+          // _showConnectionError('Connection error, retrying...$isServerError');
+          const maxRetries = 3;
+          for (var attempt = 1; attempt <= maxRetries; attempt++) {
+            await Future.delayed(const Duration(seconds: 3));
+            try {
+              final retried = await _retryRequest(error.requestOptions);
+              return handler.resolve(retried);
+            } on DioException catch (retryError) {
+              debugPrint('⚠️ Retry $attempt/$maxRetries failed: ${retryError.message}');
+              if (attempt == maxRetries) {
+                // All retries exhausted — show final error but keep user logged in
+                _showConnectionError('Server is unavailable. Please try again later.');
+                return handler.next(retryError);
+              }
+            } catch (_) {
+              if (attempt == maxRetries) {
+                _showConnectionError('Server is unavailable. Please try again later.');
+                return handler.next(error);
+              }
+            }
+          }
+        }
+
+        // All other errors — pass through unchanged
         handler.next(error);
       },
     ));
+  }
+
+  /// Ping the server without auth to distinguish "server down" from "token invalid".
+  /// Returns true if the server responds with any 2xx, false on any failure.
+  Future<bool> _pingServer() async {
+    try {
+      final pingDio = Dio(BaseOptions(
+        baseUrl: baseUrl,
+        connectTimeout: const Duration(seconds: 5),
+        receiveTimeout: const Duration(seconds: 5),
+      ));
+      final response = await pingDio.get('/api/ping');
+      debugPrint("Res[ponse Budy /api/ping Ping");
+      return response.statusCode != null && response.statusCode! < 300;
+    } catch (e) {
+      debugPrint("Res[ponse Budy /api/ping Ping$e");
+      return false;
+    }
+  }
+
+  /// Retry a failed request using the same options (headers, data, method).
+  Future<Response<dynamic>> _retryRequest(RequestOptions options) async {
+    final retryOptions = Options(
+      method: options.method,
+      headers: options.headers,
+      responseType: options.responseType,
+      contentType: options.contentType,
+      receiveTimeout: options.receiveTimeout,
+      sendTimeout: options.sendTimeout,
+    );
+    return _dio.request<dynamic>(
+      options.path,
+      data: options.data,
+      queryParameters: options.queryParameters,
+      options: retryOptions,
+    );
+  }
+
+  /// Show a non-blocking toast/snackbar for connection errors.
+  /// Uses Fluttertoast so it works without a BuildContext.
+  void _showConnectionError(String message) {
+    debugPrint('⚠️ [ApiService] $message');
+    try {
+      Fluttertoast.showToast(
+        msg: message,
+        toastLength: Toast.LENGTH_LONG,
+        gravity: ToastGravity.BOTTOM,
+      );
+    } catch (_) {}
+  }
+
+  /// Case 1 handler: session_displaced — clear token, show dialog, go to login.
+  Future<void> _handleSessionDisplaced() async {
+    debugPrint('🔐 [ApiService] session_displaced — clearing token and navigating to login');
+    final storage = StorageService();
+    await storage.clearToken();
+    clearAuthToken();
+
+    // Notify auth layer (AuthNotifier) to clear state and show dialog
+    if (onSessionDisplaced != null) {
+      onSessionDisplaced!();
+    } else if (onUnauthorized != null) {
+      // Fallback: use existing unauthorized handler
+      onUnauthorized!();
+    }
   }
 
   Map<String, dynamic> _metadataFromResponse(
@@ -439,12 +616,13 @@ class ApiService {
   }
 
   Future<void> _handle401Error() async {
+    // Called only after ping succeeded + retry still returned 401.
+    // Safe to clear token and logout at this point.
     final storage = StorageService();
-    bool hasInternet = await InternetChecker.hasInternet();
-    if (hasInternet) {
-      await storage.clearAll();
-      clearAuthToken();
-    }
+    await storage.clearAll();
+    clearAuthToken();
+    // Reset the session_displaced guard so future logins work correctly
+    _sessionDisplacedHandled = false;
 
     if (onUnauthorized != null) {
       onUnauthorized!();
@@ -536,6 +714,7 @@ class ApiService {
     await _dio.post('/api/logout');
     debugPrint('API Response: POST $baseUrl/api/logout - Success');
     clearAuthToken();
+
   }
 
   // Groups APIs
@@ -560,6 +739,8 @@ class ApiService {
       // Only logout when chat-list returns 401/403 — not for any other API
       if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
         await _handle401Error();
+        await _handle401Error();
+        logout();
       }
       rethrow;
     }
@@ -762,13 +943,17 @@ class ApiService {
   }
 
   Future<void> markMessageAsRead(int messageId) async {
-    debugPrint('API Call: PATCH $baseUrl/api/message/$messageId/read');
-    debugPrint('_markMessageAsRead $baseUrl/api/message/$messageId/read');
-    var data = await _dio.patch('/api/message/$messageId/read');
-    debugPrint(
-        'API Response: PATCH $baseUrl/api/message/$messageId/read - $data Success');
-    debugPrint(
-        '_markMessageAsRead $baseUrl/api/message/$messageId/read - $data Success');
+    // Fire-and-forget: never throw — callers don't await this
+    try {
+      debugPrint('API Call: PATCH $baseUrl/api/message/$messageId/read');
+      final data = await _dio.patch('/api/message/$messageId/read');
+      debugPrint('API Response: PATCH $baseUrl/api/message/$messageId/read - ${data.statusCode} Success');
+    } on DioException catch (e) {
+      // Non-critical: log and swallow — read receipts should never crash the chat
+      debugPrint('⚠️ markMessageAsRead failed (id=$messageId): ${e.response?.statusCode} ${e.message}');
+    } catch (e) {
+      debugPrint('⚠️ markMessageAsRead unexpected error (id=$messageId): $e');
+    }
   }
 
   Future<Map<String, dynamic>> jumpToMessage(

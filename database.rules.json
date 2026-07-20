@@ -1,0 +1,35 @@
+{
+  "rules": {
+    "chats": {
+      "$chatId": {
+        "messages": {
+          ".indexOn": ["timestamp"]
+        }
+      }
+    },
+    "chat_list": {
+      "$userId": {
+        ".indexOn": ["updatedAt", "sort_time", "last_message_time"]
+      }
+    },
+    "presence": {
+      "$userId": {
+        ".indexOn": ["isOnline", "lastSeen"]
+      }
+    },
+    "typing": {
+      "$chatId": {
+        "$userId": {
+          ".indexOn": ["timestamp"]
+        }
+      }
+    },
+    "read_receipts": {
+      "$chatKey": {
+        "$userId": {
+          ".indexOn": ["read_at"]
+        }
+      }
+    }
+  }
+}

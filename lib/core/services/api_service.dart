@@ -17,7 +17,7 @@ class LoginRequest {
   Map<String, dynamic> toJson() => {
         'mobile': mobile,
         'password': password,
-        if (fcmToken != null) 'fcm_token': fcmToken,
+         'fcm_token': fcmToken ?? '',
       };
 }
 

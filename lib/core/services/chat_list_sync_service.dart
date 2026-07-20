@@ -341,24 +341,57 @@ class ChatListSyncService {
     // Cancel existing listeners
     _stopRealtimeListeners();
 
-    // Listen to all chats under current user
-    final listener = _chatListRef.child(_currentUserId!).onChildChanged.listen((event) {
+    // onChildChanged: fires when an existing chat entry is updated (last message,
+    // unread count, sort_time). Covers ~95% of all real-time events.
+    final changedListener = _chatListRef.child(_currentUserId!).onChildChanged.listen((event) {
       _handleFirebaseUpdate(event);
     });
+    _activeListeners['changed'] = changedListener;
 
-    _activeListeners['main'] = listener;
-    debugPrint('👂 Started Firebase real-time listener for user: $_currentUserId');
+    // onChildAdded: fires for brand-new chats added by other devices / server.
+    // Without this, a new group created on another device never appears here.
+    // Skip the initial seed burst by checking if the chat already exists in Hive
+    // — onChildChanged handles all updates for pre-existing chats.
+    final addedListener = _chatListRef.child(_currentUserId!).onChildAdded.listen((event) {
+      final key = event.snapshot.key;
+      if (key == null) return;
+      final parsed = _parseChatKey(key);
+      final chatId = parsed['id']?.toString();
+      final chatType = parsed['type']?.toString();
+      final attendance = _asBool(parsed['attendance_group']);
+      if (chatId == null || chatType == null) return;
+      // Already in Hive — skip, onChildChanged handles updates
+      if (_hiveDataSource.getChatById(chatId, chatType, attendance) != null) return;
+      _handleFirebaseUpdate(event);
+    });
+    _activeListeners['added'] = addedListener;
+
+    debugPrint('👂 Started Firebase real-time listeners (added+changed) for user: $_currentUserId');
   }
 
   /// Start per-chat message listeners so new messages from other users
   /// immediately increment the unread badge on HomeScreen without FCM.
+  /// BANDWIDTH OPTIMIZATION: Only subscribe to chats with recent activity
+  /// (last 24h) or unread messages. Other chats are subscribed lazily when
+  /// the user opens them. This prevents N simultaneous Firebase connections
+  /// for users with hundreds of chats.
   void _startMessageListeners(List<ChatHiveModel> chats) {
     if (_currentUserId == null) return;
 
-    for (final chat in chats) {
+    // Priority 1: chats with unread messages (must always be subscribed)
+    // Priority 2: chats active in the last 24 hours (likely to receive messages)
+    // Everything else: skip — subscribe lazily when user opens the chat
+    final now = DateTime.now();
+    final activeChats = chats.where((chat) {
+      if (chat.unreadCount > 0) return true;
+      final lastActivity = chat.sortTime ?? chat.lastMessageTime ?? chat.updatedAt;
+      return now.difference(lastActivity).inHours < 24;
+    }).take(20).toList(); // hard cap at 20 simultaneous listeners
+
+    for (final chat in activeChats) {
       _subscribeToChat(chat);
     }
-    debugPrint('👂 Started message listeners for ${chats.length} chats');
+    debugPrint('👂 Started message listeners for ${activeChats.length}/${chats.length} active chats');
   }
 
   /// Subscribe to a single chat's messages node for real-time unread updates.

@@ -14,7 +14,7 @@ class MessageDatabaseService {
 
   Database? _database;
   static const String _dbName = 'messages.db';
-  static const int _dbVersion = 2;
+  static const int _dbVersion = 3;
   static const String _messagesTable = 'messages';
   bool _isInitialized = false;
 
@@ -90,17 +90,29 @@ class MessageDatabaseService {
       CREATE INDEX idx_firebase_id ON $_messagesTable(firebase_id)
     ''');
 
-    debugPrint('💾 Database created successfully');
+    // Index for getReadMessageIds() and markMessagesAsRead() fast-path:
+    // avoids full table scan when filtering by is_read flag.
+    await db.execute('''
+      CREATE INDEX idx_chat_read ON $_messagesTable(chat_id, chat_type, is_read)
+    ''');
+
+    debugPrint('\u{1F4BE} Database created successfully');
   }
 
   // Handle database upgrades
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    // Migration from version 1 to 2: Add reply_to_message_json column
+    // v1 → v2: Add reply_to_message_json column
     if (oldVersion < 2) {
-      await db.execute('''
-        ALTER TABLE $_messagesTable ADD COLUMN reply_to_message_json TEXT
-      ''');
-      debugPrint('💾 Database upgraded from v$oldVersion to v$newVersion: Added reply_to_message_json column');
+      await db.execute(
+          'ALTER TABLE $_messagesTable ADD COLUMN reply_to_message_json TEXT');
+      debugPrint('\u{1F4BE} DB v$oldVersion\u2192v2: Added reply_to_message_json');
+    }
+    // v2 → v3: Add composite index for read-status fast-path queries.
+    // CREATE INDEX IF NOT EXISTS is safe to run even if the index already exists.
+    if (oldVersion < 3) {
+      await db.execute(
+          'CREATE INDEX IF NOT EXISTS idx_chat_read ON $_messagesTable(chat_id, chat_type, is_read)');
+      debugPrint('\u{1F4BE} DB v2\u2192v3: Added idx_chat_read index');
     }
   }
 

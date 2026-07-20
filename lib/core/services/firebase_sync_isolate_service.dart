@@ -1,21 +1,27 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../models/message_model.dart';
-import 'firebase_realtime_service.dart';
 import 'message_database_service.dart';
 
-/// Background Firebase sync service
-/// Syncs Firebase messages to SQLite asynchronously
+/// Background Firebase sync service.
+///
+/// BANDWIDTH NOTE: This service intentionally does NOT open its own Firebase
+/// listener. MessageSyncService.setupFirebaseListener() already holds the
+/// single authoritative onValue listener per chat and calls
+/// _cacheMessagesRealtimeBackground() to persist every batch to SQLite.
+/// Opening a second listener here would double every Firebase message download.
+///
+/// All methods that previously started a duplicate listener are now no-ops or
+/// delegate to the SQLite layer directly.
 class FirebaseSyncIsolateService {
   static final FirebaseSyncIsolateService _instance = FirebaseSyncIsolateService._internal();
   factory FirebaseSyncIsolateService() => _instance;
   FirebaseSyncIsolateService._internal();
 
-  final Map<String, StreamSubscription> _messageSubscriptions = {};
   final MessageDatabaseService _dbService = MessageDatabaseService();
 
-  /// Start background sync for a chat
-  /// This runs Firebase listener and saves to DB asynchronously
+  /// No-op: MessageSyncService already holds the single Firebase listener.
+  /// Calling this would open a duplicate onValue stream and double bandwidth.
   Future<void> startSync({
     required String chatId,
     required String chatType,
@@ -23,79 +29,24 @@ class FirebaseSyncIsolateService {
     String? otherUserId,
     bool? isAttendanceGroup,
   }) async {
-    final key = _getSyncKey(chatId, chatType, isAttendanceGroup);
-    
-    // Cancel existing subscription
-    await stopSync(chatId, chatType, isAttendanceGroup);
-
-    try {
-      // Get Firebase message stream
-      final messageStream = FirebaseRealtimeService.getMessagesStreamLimited(
-        chatId,
-        chatType,
-        100, // Sync last 100 messages
-        currentUserId: currentUserId,
-        otherUserId: otherUserId ?? (chatType == 'group' ? '0' : chatId),
-        attendanceGroup: isAttendanceGroup,
-      );
-
-      // Listen to Firebase and save to SQLite asynchronously
-      _messageSubscriptions[key] = messageStream.listen(
-        (messages) => _handleFirebaseMessages(messages, chatId, chatType),
-        onError: (error) => debugPrint('❌ Firebase sync error for $key: $error'),
-      );
-
-      debugPrint('🔄 Started background Firebase sync for $key');
-    } catch (e) {
-      debugPrint('❌ Failed to start Firebase sync for $key: $e');
-    }
+    // Intentional no-op — see class doc above.
+    debugPrint('⏭️ FirebaseSyncIsolateService.startSync skipped — MessageSyncService listener is active');
   }
 
-  /// Handle Firebase messages and save to SQLite asynchronously
-  Future<void> _handleFirebaseMessages(
-    List<Message> messages,
-    String chatId,
-    String chatType,
-  ) async {
-    if (messages.isEmpty) return;
+  /// No-op: nothing to stop since startSync is a no-op.
+  Future<void> stopSync(String chatId, String chatType, bool? isAttendanceGroup) async {}
 
-    try {
-      // Save to SQLite asynchronously (non-blocking)
-      unawaited(_dbService.saveMessages(messages, chatId, chatType));
-      debugPrint('✅ Synced ${messages.length} Firebase messages to SQLite for $chatId');
-    } catch (e) {
-      debugPrint('❌ Error saving Firebase messages to SQLite: $e');
-    }
-  }
+  /// No-op.
+  Future<void> stopAllSyncs() async {}
 
-  /// Stop background sync for a chat
-  Future<void> stopSync(String chatId, String chatType, bool? isAttendanceGroup) async {
-    final key = _getSyncKey(chatId, chatType, isAttendanceGroup);
-    
-    // Cancel subscription
-    await _messageSubscriptions[key]?.cancel();
-    _messageSubscriptions.remove(key);
-    
-    debugPrint('🛑 Stopped Firebase sync for $key');
-  }
-
-  /// Stop all syncs
-  Future<void> stopAllSyncs() async {
-    for (final subscription in _messageSubscriptions.values) {
-      await subscription.cancel();
-    }
-    _messageSubscriptions.clear();
-    
-    debugPrint('🛑 Stopped all Firebase syncs');
-  }
-
-  /// Get unique sync key
   String _getSyncKey(String chatId, String chatType, bool? isAttendanceGroup) {
     final suffix = isAttendanceGroup == true ? 'true' : '';
     return '${chatType}_${chatId}$suffix';
   }
 
-  /// Sync all messages from Firebase to SQLite (one-time full sync)
+  /// One-time SQLite read — no Firebase download.
+  /// Callers that need a full Firebase sync should use
+  /// MessageSyncService.syncRecentFirebaseMessages() instead.
   Future<void> syncAllMessages({
     required String chatId,
     required String chatType,
@@ -104,28 +55,8 @@ class FirebaseSyncIsolateService {
     bool? isAttendanceGroup,
     int limit = 500,
   }) async {
-    try {
-      debugPrint('🔄 Starting full Firebase sync for $chatId...');
-      
-      final messages = await FirebaseRealtimeService.getMessagesStreamLimited(
-        chatId,
-        chatType,
-        limit,
-        currentUserId: currentUserId,
-        otherUserId: otherUserId ?? (chatType == 'group' ? '0' : chatId),
-        attendanceGroup: isAttendanceGroup,
-      ).first.timeout(
-        const Duration(seconds: 10),
-        onTimeout: () => <Message>[],
-      );
-
-      if (messages.isNotEmpty) {
-        await _dbService.saveMessages(messages, chatId, chatType);
-        debugPrint('✅ Full sync completed: ${messages.length} messages saved to SQLite');
-      }
-    } catch (e) {
-      debugPrint('❌ Full Firebase sync error: $e');
-    }
+    // No-op: MessageSyncService handles all Firebase → SQLite syncing.
+    debugPrint('⏭️ FirebaseSyncIsolateService.syncAllMessages skipped — use MessageSyncService');
   }
 
   /// Load messages from SQLite (instant, no loader needed)

@@ -1,6 +1,5 @@
 import 'package:app_links/app_links.dart';
 import 'package:dio/dio.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -15,8 +14,6 @@ import '../../core/services/chat_list_manager.dart';
 import '../../core/services/chat_list_update_service.dart';
 import '../../core/services/deep_link_service.dart';
 import '../../core/services/firebase_message_listener.dart';
-import '../../core/services/message_sync_service.dart';
-import '../../core/services/offline_queue_service.dart';
 import '../../core/utils/internet_checker.dart';
 import '../../shared/providers/auth_provider.dart';
 import '../../shared/providers/optimized_chat_provider.dart';
@@ -35,9 +32,7 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen>
     with WidgetsBindingObserver {
   final TextEditingController _searchController = TextEditingController();
-  final MessageSyncService _messageSyncService = MessageSyncService();
   bool _isSearching = false;
-  String? _conversationSyncSignature;
   // Throttle resume refresh — avoid duplicate syncs if user switches apps quickly
   DateTime? _lastResumeSync;
   // Cache queue total so _buildQueueStatusBanner doesn’t call getQueueStats() on every build
@@ -94,9 +89,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         await ref
             .read(optimizedChatProvider.notifier)
             .initialize(userId: user.id);
-        // Trigger offline sync once after chats are loaded — not on every build
-        final chats = ref.read(optimizedChatProvider).chats;
-        _scheduleConversationOfflineSync(chats);
+        // Real-time listeners in ChatListSyncService handle all updates — no polling needed.
       }
       // FirebaseMessageListener handles both onMessage and onMessageOpenedApp
       FirebaseMessageListener.init(ref);
@@ -104,33 +97,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     });
   }
 
-  void _handleIncomingMessage(Map<String, dynamic> data) {
-    try {
-      final chatId =
-          data['chat_id']?.toString() ?? data['group_id']?.toString();
-      final attendanceGroup =
-          ChatHiveModel.parseAttendanceGroup(data['attendance_group']);
-      final chatType = data['chat_type']?.toString() ??
-          (data['group_id'] != null ? 'group' : 'user');
-      final messageText = data['message']?.toString() ??
-          data['body']?.toString() ??
-          'New message';
-
-      if (chatId != null) {
-        ref.read(optimizedChatProvider.notifier).updateChatWithMessage(
-              chatId: chatId,
-              chatType: chatType,
-              attendanceGroup: attendanceGroup,
-              lastMessage: messageText,
-              lastMessageTime: DateTime.now(),
-              isIncoming: true,
-            );
-        debugPrint('⬆️ Chat $chatType/$chatId updated and moved to top');
-      }
-    } catch (e) {
-      debugPrint('❌ Error handling incoming message: $e');
-    }
-  }
 
   void _checkPendingDeepLink() {
     debugPrint(
@@ -207,15 +173,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     _lastResumeSync = now;
     debugPrint('🔄 [HomeScreen] App resumed — refreshing chat list');
     ref.read(optimizedChatProvider.notifier).refresh();
-    // Re-trigger offline sync with current chats after resume
-    final chats = ref.read(optimizedChatProvider).chats;
-    _scheduleConversationOfflineSync(chats);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _messageSyncService.stopChatListFirebaseSync();
     _searchController.dispose();
     super.dispose();
   }
@@ -224,9 +186,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   Widget build(BuildContext context) {
     final authState = ref.watch(authProvider);
     final chatState = ref.watch(optimizedChatProvider);
-    // NOTE: _scheduleConversationOfflineSync is called from initState postFrameCallback
-    // and _onAppResumed only — NOT here, to avoid Firebase sync on every rebuild.
-
     return Scaffold(
       appBar: AppBar(
         title: _isSearching
@@ -331,34 +290,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         },
         child: const Icon(Icons.chat),
       ),
-    );
-  }
-
-  void _scheduleConversationOfflineSync(List<ChatHiveModel> chats) {
-    final user = ref.read(authProvider).user;
-    if (user == null || chats.isEmpty) return;
-
-    final actualRole = user.actual_role.toLowerCase();
-    final userRole =
-        actualRole == 'no user' ? user.role.toLowerCase() : actualRole;
-
-    // Exclude unreadCount from signature — badge changes must not restart
-    // background Firebase sync (wasteful + causes unnecessary Firebase reads).
-    final signature = chats.take(30).map((chat) {
-      final time = chat.sortTime ?? chat.lastMessageTime ?? chat.updatedAt;
-      return '${chat.type}_${chat.id}_${time.millisecondsSinceEpoch}';
-    }).join('|');
-
-    final nextSignature = '${user.id}|$userRole|$signature';
-    if (_conversationSyncSignature == nextSignature) return;
-    _conversationSyncSignature = nextSignature;
-
-    // Run sync directly — caller already ensures this is not inside build()
-    if (!mounted) return;
-    _messageSyncService.startChatListFirebaseSync(
-      chats: chats,
-      currentUserId: user.id,
-      userRole: userRole,
     );
   }
 
@@ -515,7 +446,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         : ListTile(
             key: ValueKey(chat.getUniqueKey()),
             onTap: () async {
-              // Mark as read immediately for smooth UX
+              // Mark as read immediately — clears badge before entering chat
+              // so the home screen badge is 0 when user returns.
+              // Do NOT call refresh() after returning: it races with markAsRead
+              // and can restore a stale unread count from the API response.
               if (chat.unreadCount > 0) {
                 ref
                     .read(optimizedChatProvider.notifier)
@@ -532,8 +466,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                 await context.push(
                     '/chat/${chat.id}?attendance_group=${chat.attendanceGroup}&type=user&name=${Uri.encodeComponent(chat.name)}');
               }
-              // Refresh chat list when returning from chat screen
-              ref.read(optimizedChatProvider.notifier).refresh();
+              // No refresh() here — markAsRead already zeroed the badge in Hive
+              // and Firebase listeners keep the list live in real time.
             },
             onLongPress: () => _showChatOptions(chat),
             leading: Stack(

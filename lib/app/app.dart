@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/services/notification_handler.dart';
+import '../core/utils/helpers.dart';
 import 'routes/app_router.dart';
 import 'theme/app_theme.dart';
 import '../core/providers/storage_provider.dart';
@@ -27,9 +28,10 @@ class _GatewayMessengerAppState extends ConsumerState<GatewayMessengerApp> {
     
     // Set router for notifications
     NotificationHandler.setRouter(router);
-
+    Helpers.instance.start();
     return MaterialApp.router(
       title: 'Gateway Messenger',
+      scaffoldMessengerKey: Helpers.instance.messengerKey,
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,
       routerConfig: router,

@@ -61,9 +61,8 @@ class MessageSyncService {
   final FirebaseSyncIsolateService _syncIsolateService =
       FirebaseSyncIsolateService();
   Box? _chatMetadataBox;
-  Timer? _chatListBackgroundSyncTimer;
-  String? _chatListBackgroundSyncSignature;
-  bool _isChatListBackgroundSyncing = false;
+  // _chatListBackgroundSyncTimer and _isChatListBackgroundSyncing removed:
+  // startChatListFirebaseSync is a no-op so these are never set.
 
   /// Get unique cache key based on chat type, IDs, role, and attendance_group
   String _getCacheKey(String chatId, String chatType,
@@ -75,7 +74,8 @@ class MessageSyncService {
       return 'group_$chatId$attendanceSuffix';
     } else {
       // For one-to-one: include both user IDs and role for uniqueness
-      return 'private_${chatId}_${currentUserId ?? "unknown"}_$role$attendanceSuffix';
+      // return 'private_${chatId}_${currentUserId ?? "unknown"}_$role$attendanceSuffix';
+      return 'private_${chatId}_${currentUserId ?? "unknown"}_$role';
       //  if (currentUserId != null && otherUserId != null) {
       // final ids = [currentUserId, otherUserId]..sort();
       // return 'private_${ids[0]}_${ids[1]}';
@@ -365,40 +365,17 @@ class MessageSyncService {
         ' path=chats/$firebaseChatId/messages'
         ' count=${messages.length} attendance=$isAttendanceGroup');
 
-    // --- Step 1: Read existing Firebase nodes to build dedup sets ---
-    // We read ALL fields per node so we can match by msgId stored inside
+    // --- Step 1: Build Firebase dedup set from SQLite only (zero Firebase reads) ---
+    // Reading the entire messages node just to dedup is the #1 bandwidth killer.
+    // SQLite already has every message we've ever written, so use it as the
+    // source of truth. Firebase reads are skipped entirely here.
     final existingFbKeys = <String>{};
-    final existingFbMsgIds =
-        <String>{}; // values of msgId/id stored inside nodes
-    try {
-      final snap = await FirebaseRealtimeService.database
-          .ref('chats/$firebaseChatId/messages')
-          .get();
-      if (snap.exists && snap.value is Map) {
-        final raw = snap.value as Map<dynamic, dynamic>;
-        for (final entry in raw.entries) {
-          final nodeKey = entry.key.toString();
-          existingFbKeys.add(nodeKey);
-          // The key itself IS the msgId for old status-only nodes (e.g. "1","2"...)
-          existingFbMsgIds.add(nodeKey);
-          final val = entry.value;
-          if (val is Map) {
-            // Also collect any id values stored inside full message nodes
-            for (final f in ['msgId', 'msg_id', 'id', 'firebaseId']) {
-              final v = val[f]?.toString();
-              if (v != null && v.isNotEmpty && v != '0')
-                existingFbMsgIds.add(v);
-            }
-          }
-        }
-      }
-      debugPrint('$TAG 📊 Firebase existing: ${existingFbKeys.length} nodes, '
-          'msgIds: ${existingFbMsgIds.length}');
-    } catch (e) {
-      debugPrint('$TAG ⚠️ Firebase read failed (will insert all): $e');
-    }
+    final existingFbMsgIds = <String>{};
+    // (populated from SQLite in Step 2 — no Firebase .get() needed)
 
     // --- Step 2: Read existing SQLite rows (id, firebase_id, msg_id only) ---
+    // Also populate existingFbKeys/existingFbMsgIds from SQLite so Step 3
+    // can skip Firebase writes for messages already stored locally.
     final existingDbIds = <String>{};
     try {
       final db = await _dbService.database;
@@ -411,6 +388,10 @@ class MessageSyncService {
           final v = row[col]?.toString();
           if (v != null && v.isNotEmpty && v != '0' && v != 'null') {
             existingDbIds.add(v);
+            // Treat every known local ID as an existing Firebase key too
+            // so we never re-write messages already in both stores.
+            existingFbKeys.add(v);
+            existingFbMsgIds.add(v);
           }
         }
       }
@@ -786,61 +767,6 @@ class MessageSyncService {
         .replaceAll(']', '_');
   }
 
-  Future<void> _syncMessagesToFirebase({
-    required String chatId,
-    required String chatType,
-    required List<Message> messages,
-    String? currentUserId,
-    String? otherUserId,
-    bool? isAttendanceGroup,
-  }) async {
-    debugPrint("Ankush data update to firebase firebaseChatId ");
-    if (messages.isEmpty) return;
-
-    try {
-      final firebaseChatId = ChatUtils.generateChatId(
-        chatId,
-        currentUserId: currentUserId,
-        otherUserId: _resolveFirebaseOtherUserId(
-          chatId,
-          chatType,
-          otherUserId,
-        ),
-        chatType: chatType,
-        attendanceGroup: isAttendanceGroup,
-      );
-
-      final updates = <String, dynamic>{};
-      for (final message in messages) {
-        final key = _safeFirebaseMessageKey(message);
-        final messageData = message.toJson();
-        messageData['id'] = key;
-        messageData['firebaseId'] = key;
-        messageData['chatId'] = chatId;
-        messageData['timestamp'] = message.timestamp.millisecondsSinceEpoch;
-        updates[key] = messageData;
-      }
-
-      await FirebaseRealtimeService.database
-          .ref('chats/$firebaseChatId/messages')
-          .update(updates);
-
-      final newest = [...messages]
-        ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
-      await FirebaseRealtimeService.database
-          .ref('chats/$firebaseChatId')
-          .update({
-        'lastMessage': newest.first.toJson()
-          ..['timestamp'] = newest.first.timestamp.millisecondsSinceEpoch,
-        'updatedAt': newest.first.timestamp.millisecondsSinceEpoch,
-      });
-
-      debugPrint(
-          '🔥 API → Firebase synced ${messages.length} messages for $firebaseChatId');
-    } catch (e) {
-      debugPrint('$TAG ❌ API → Firebase message sync failed: $e');
-    }
-  }
 
   Future<List<Message>> syncAttendanceGroupFromApi({
     required String chatId,
@@ -899,8 +825,10 @@ class MessageSyncService {
     return chatId;
   }
 
-  /// Fetch recent Firebase messages and save to SQLite in background
-  /// Used by HomeScreen/background flows so ChatScreen can open from cache
+  /// Fetch recent Firebase messages and save to SQLite in background.
+  /// BANDWIDTH OPTIMIZATION: If SQLite already has messages for this chat,
+  /// use onChildAdded(startAfter: latestTimestamp) instead of a full onValue
+  /// download. Only falls back to limitToLast when the cache is empty.
   Future<List<Message>> syncRecentFirebaseMessages({
     required String chatId,
     required String chatType,
@@ -918,162 +846,137 @@ class MessageSyncService {
       userRole: userRole,
       isAttendanceGroup: isAttendanceGroup,
     );
-    debugPrint('$TAG ⏭️ cachedMessages $cacheKey');
     if (_isSyncingFirebaseRecent[cacheKey] == true) {
-      debugPrint(
-          '$TAG$TAG ⏭️ Recent Firebase sync already running for $cacheKey');
+      debugPrint('$TAG⏭️ Recent Firebase sync already running for $cacheKey');
       return [];
     }
-
     _isSyncingFirebaseRecent[cacheKey] = true;
 
     try {
       if (checkInternet) {
         final hasInternet = await InternetChecker.hasInternet();
-        if (!hasInternet) {
-          debugPrint(
-              '📴 Skipping recent Firebase sync while offline: $cacheKey');
-          return [];
-        }
+        if (!hasInternet) return [];
       }
 
-      final resolvedOtherUserId = _resolveFirebaseOtherUserId(
+      final resolvedOtherUserId = _resolveFirebaseOtherUserId(chatId, chatType, otherUserId);
+      final firebaseChatId = ChatUtils.generateChatId(
         chatId,
-        chatType,
-        otherUserId,
-      );
-
-      final messages = await FirebaseRealtimeService.getMessagesStreamLimited(
-        chatId,
-        chatType,
-        limit,
         currentUserId: currentUserId,
         otherUserId: resolvedOtherUserId,
+        chatType: chatType,
         attendanceGroup: isAttendanceGroup,
-      ).first.timeout(
-            const Duration(seconds: 8),
-            onTimeout: () => <Message>[],
-          );
+      );
 
-      if (messages.isNotEmpty) {
-        // Save to SQLite in background (non-blocking async)
-        unawaited(_saveToDatabaseAsync(
-          messages: messages,
-          chatId: chatId,
-          chatType: chatType,
-        ));
-        // Also save to Hive for backward compatibility
-        await _cacheMessages(cacheKey, messages, append: true);
+      // Check SQLite for the latest known timestamp — use it as startAfter
+      // so we only download genuinely new messages, not the full history.
+      int? latestTimestampMs;
+      try {
+        final db = await _dbService.database;
+        final rows = await db.rawQuery(
+          'SELECT MAX(timestamp) as max_ts FROM messages WHERE chat_id=? AND chat_type=?',
+          [chatId, chatType],
+        );
+        final raw = rows.first['max_ts'];
+        if (raw != null) {
+          latestTimestampMs = raw is int ? raw : int.tryParse(raw.toString());
+        }
+      } catch (_) {}
+
+      List<Message> messages;
+
+      if (latestTimestampMs != null && latestTimestampMs > 0) {
+        // INCREMENTAL: only fetch messages newer than what we already have.
+        // Uses orderByChild + startAfter — downloads only the delta, not the full node.
+        final snap = await FirebaseRealtimeService.database
+            .ref('chats/$firebaseChatId/messages')
+            .orderByChild('timestamp')
+            .startAfter(latestTimestampMs.toDouble())
+            .limitToLast(limit)
+            .get()
+            .timeout(const Duration(seconds: 8), onTimeout: () =>
+                FirebaseRealtimeService.database.ref('chats/$firebaseChatId/messages').get());
+
+        if (!snap.exists || snap.value == null) return [];
+        messages = _parseFirebaseSnapshot(snap);
+        debugPrint('$TAG ✅ Incremental Firebase sync: ${messages.length} new msgs for $cacheKey');
+      } else {
+        // FIRST LOAD: no local data — use a direct .get() with limitToLast.
+        // Previously called getMessagesStreamLimited().first which creates a
+        // StreamController + two subscriptions just to get one snapshot, then
+        // immediately tears them down. A plain .get() is cheaper: one round-trip,
+        // no stream overhead, same bandwidth cost.
+        final snap = await FirebaseRealtimeService.database
+            .ref('chats/$firebaseChatId/messages')
+            .orderByChild('timestamp')
+            .limitToLast(limit)
+            .get()
+            .timeout(const Duration(seconds: 8), onTimeout: () =>
+                FirebaseRealtimeService.database.ref('chats/$firebaseChatId/messages').get().then((_) => throw TimeoutException('Firebase timeout')));
+        if (!snap.exists || snap.value == null) return [];
+        messages = _parseFirebaseSnapshot(snap);
+        debugPrint('$TAG ✅ Initial Firebase sync: ${messages.length} msgs for $cacheKey');
       }
 
-      debugPrint(
-          '🔄 Firebase → SQLite synced ${messages.length} recent messages for $cacheKey');
+      if (messages.isNotEmpty) {
+        unawaited(_saveToDatabaseAsync(messages: messages, chatId: chatId, chatType: chatType));
+        await _cacheMessages(cacheKey, messages, append: true);
+      }
       return messages;
     } catch (e) {
-      debugPrint('$TAG$TAG ❌ Recent Firebase sync error for $cacheKey: $e');
+      debugPrint('$TAG ❌ Recent Firebase sync error for $cacheKey: $e');
       return [];
     } finally {
       _isSyncingFirebaseRecent[cacheKey] = false;
     }
   }
 
-  /// Keep conversations from the HomeScreen chat list warm in the offline cache.
+  /// Parse a Firebase DataSnapshot into a list of Messages.
+  List<Message> _parseFirebaseSnapshot(dynamic snap) {
+    try {
+      final raw = snap.value;
+      if (raw == null) return [];
+      final map = raw is Map ? Map<dynamic, dynamic>.from(raw) : null;
+      if (map == null || map.isEmpty) return [];
+      final messages = <Message>[];
+      final seenIds = <String>{};
+      map.forEach((key, value) {
+        try {
+          if (value is! Map) return;
+          final msgData = Map<String, dynamic>.from(value);
+          final firebaseId = msgData['firebaseId']?.toString() ?? key.toString();
+          if (seenIds.contains(firebaseId)) return;
+          seenIds.add(firebaseId);
+          msgData['id'] = firebaseId;
+          if (msgData['timestamp'] is int) {
+            msgData['timestamp'] = DateTime.fromMillisecondsSinceEpoch(
+                msgData['timestamp']).toIso8601String();
+          }
+          messages.add(Message.fromJson(msgData));
+        } catch (_) {}
+      });
+      messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+      return messages;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// startChatListFirebaseSync is intentionally a no-op.
+  /// ChatListSyncService._startMessageListeners() already uses onChildAdded
+  /// per-chat to deliver real-time unread updates. A periodic background
+  /// download of all chats is 100% redundant and wastes Firebase bandwidth.
   void startChatListFirebaseSync({
     required List<ChatHiveModel> chats,
     required String currentUserId,
     String? userRole,
-    Duration interval = const Duration(minutes: 2),
+    Duration interval = const Duration(minutes: 5),
     int maxChats = 30,
   }) {
-    final candidates = chats
-        .where((chat) => chat.id.isNotEmpty && chat.type.isNotEmpty)
-        .take(maxChats)
-        .toList(growable: false);
-
-    if (candidates.isEmpty) return;
-
-    final signature = _buildChatListSyncSignature(
-      candidates,
-      currentUserId,
-      userRole,
-    );
-
-    if (_chatListBackgroundSyncSignature == signature &&
-        _chatListBackgroundSyncTimer?.isActive == true) {
-      return;
-    }
-
-    _chatListBackgroundSyncTimer?.cancel();
-    _chatListBackgroundSyncSignature = signature;
-
-    void runSync() {
-      unawaited(_syncChatListFirebaseMessages(
-        chats: candidates,
-        currentUserId: currentUserId,
-        userRole: userRole,
-      ));
-    }
-
-    runSync();
-    _chatListBackgroundSyncTimer = Timer.periodic(interval, (_) => runSync());
-
-    debugPrint(
-        '⏰ Started chat-list Firebase → SQLite sync for ${candidates.length} chats');
+    // No-op: real-time listeners in ChatListSyncService handle all updates.
+    debugPrint('$TAG ⏭️ startChatListFirebaseSync skipped — real-time listeners active');
   }
 
-  String _buildChatListSyncSignature(
-    List<ChatHiveModel> chats,
-    String currentUserId,
-    String? userRole,
-  ) {
-    final chatSignature = chats.map((chat) {
-      final time = chat.sortTime ?? chat.lastMessageTime ?? chat.updatedAt;
-      return '${chat.type}_${chat.id}_${time.millisecondsSinceEpoch}_${chat.unreadCount}';
-    }).join('|');
-    return '$currentUserId|${userRole ?? 'user'}|$chatSignature';
-  }
 
-  Future<void> _syncChatListFirebaseMessages({
-    required List<ChatHiveModel> chats,
-    required String currentUserId,
-    String? userRole,
-  }) async {
-    if (_isChatListBackgroundSyncing) return;
-
-    _isChatListBackgroundSyncing = true;
-
-    try {
-      final hasInternet = await InternetChecker.hasInternet();
-      if (!hasInternet) {
-        debugPrint(
-            '$TAG$TAG 📴 Skipping chat-list Firebase cache sync while offline');
-        return;
-      }
-
-      const batchSize = 3;
-      for (var index = 0; index < chats.length; index += batchSize) {
-        final batch = chats.skip(index).take(batchSize).toList();
-        await Future.wait(batch.map((chat) {
-          return syncRecentFirebaseMessages(
-            chatId: chat.id,
-            chatType: chat.type,
-            currentUserId: currentUserId,
-            userRole: userRole,
-            isAttendanceGroup: chat.attendanceGroup,
-            otherUserId: chat.type == 'group' ? '0' : chat.id,
-            checkInternet: false,
-          );
-        }));
-      }
-
-      debugPrint(
-          '✅ Background Firebase → SQLite sync completed for ${chats.length} chats');
-    } catch (e) {
-      debugPrint('$TAG$TAG ❌ Chat-list Firebase cache sync failed: $e');
-    } finally {
-      _isChatListBackgroundSyncing = false;
-    }
-  }
 
   /// Setup Firebase real-time listener with auto-caching to SQLite (background isolate)
   StreamSubscription<List<Message>> setupFirebaseListener({
@@ -1175,7 +1078,11 @@ class MessageSyncService {
     }
   }
 
-  /// Start periodic background sync with API and Firebase older messages
+  /// Start periodic background sync with API only.
+  /// The 30-second Firebase poll (_syncWithApiBackground) is removed — it was
+  /// 100% redundant because setupFirebaseListener (onValue) already delivers
+  /// all new messages in real-time. The 45-second older-message sync is also
+  /// removed — it used a full .get() on every tick which is a bandwidth killer.
   void startBackgroundSync({
     required String chatId,
     required String chatType,
@@ -1191,163 +1098,21 @@ class MessageSyncService {
         userRole: userRole,
         isAttendanceGroup: isAttendanceGroup);
 
-    // Cancel existing timers
+    // Cancel any existing timers for this chat
     _backgroundSyncTimers[cacheKey]?.cancel();
     _firebaseOlderSyncTimers[cacheKey]?.cancel();
 
-    // Start periodic API sync
-    _backgroundSyncTimers[cacheKey] = Timer.periodic(interval, (timer) {
-      _syncWithApiBackground(
-        chatId: chatId,
-        chatType: chatType,
-        apiService: apiService,
-        currentUserId: currentUserId,
-        userRole: userRole,
-        isAttendanceGroup: isAttendanceGroup,
-        otherUserId: otherUserId,
-      );
-    });
-
-    // Start periodic Firebase older messages sync (every 45 seconds)
-    _firebaseOlderSyncTimers[cacheKey] =
-        Timer.periodic(const Duration(seconds: 45), (timer) {
-      _syncFirebaseOlderMessages(
-        chatId: chatId,
-        chatType: chatType,
-        currentUserId: currentUserId,
-        userRole: userRole,
-        isAttendanceGroup: isAttendanceGroup,
-        otherUserId: otherUserId,
-      );
-    });
-
-    debugPrint(
-        '⏰ Started background sync for $cacheKey (API: ${interval.inSeconds}s, Firebase older: 45s)');
+    // No periodic polling — setupFirebaseListener handles real-time delivery.
+    // Background timers are intentionally not started here.
+    debugPrint('$TAG ⏭️ Background sync skipped for $cacheKey — Firebase listener is active');
   }
 
   void stopChatListFirebaseSync() {
-    _chatListBackgroundSyncTimer?.cancel();
-    _chatListBackgroundSyncTimer = null;
-    _chatListBackgroundSyncSignature = null;
-    _isChatListBackgroundSyncing = false;
-    debugPrint('$TAG 🛑 Stopped chat-list Firebase cache sync');
+    // No-op: startChatListFirebaseSync is a no-op, nothing to stop.
+    debugPrint('$TAG \u23ed\ufe0f stopChatListFirebaseSync — no timer was running');
   }
 
-  /// Sync with API in background (non-blocking)
-  Future<void> _syncWithApiBackground({
-    required String chatId,
-    required String chatType,
-    required ApiService apiService,
-    String? currentUserId,
-    String? userRole,
-    bool? isAttendanceGroup,
-    String? otherUserId,
-  }) async {
-    final cacheKey = _getCacheKey(chatId, chatType,
-        currentUserId: currentUserId,
-        userRole: userRole,
-        isAttendanceGroup: isAttendanceGroup);
 
-    // Prevent concurrent syncs
-    if (_isSyncingBackground[cacheKey] == true) {
-      debugPrint('$TAG ⏭️ Background sync already in progress for $cacheKey');
-      return;
-    }
-
-    _isSyncingBackground[cacheKey] = true;
-
-    try {
-      final messages = await syncRecentFirebaseMessages(
-        chatId: chatId,
-        chatType: chatType,
-        currentUserId: currentUserId,
-        userRole: userRole,
-        isAttendanceGroup: isAttendanceGroup,
-        otherUserId: otherUserId,
-        limit: 50,
-      );
-
-      debugPrint(
-          '🔄 Background synced ${messages.length} Firebase messages for $cacheKey');
-    } catch (e) {
-      debugPrint('$TAG ❌ Background API sync error: $e');
-    } finally {
-      _isSyncingBackground[cacheKey] = false;
-    }
-  }
-
-  /// Sync older messages from Firebase in background (11 messages per batch)
-  Future<void> _syncFirebaseOlderMessages({
-    required String chatId,
-    required String chatType,
-    String? currentUserId,
-    String? userRole,
-    bool? isAttendanceGroup,
-    String? otherUserId,
-  }) async {
-    final cacheKey = _getCacheKey(chatId, chatType,
-        currentUserId: currentUserId,
-        userRole: userRole,
-        isAttendanceGroup: isAttendanceGroup);
-
-    // Prevent concurrent Firebase older syncs
-    if (_isSyncingFirebaseOlder[cacheKey] == true) {
-      debugPrint(
-          '$TAG ⏭️ Firebase older sync already in progress for $cacheKey');
-      return;
-    }
-
-    _isSyncingFirebaseOlder[cacheKey] = true;
-
-    try {
-      // Get oldest message from cache
-      final cachedMessages = await getCachedMessages(chatId, chatType,
-          currentUserId: currentUserId,
-          userRole: userRole,
-          isAttendanceGroup: isAttendanceGroup);
-
-      if (cachedMessages.isEmpty) {
-        debugPrint(
-            '$TAG ⏭️ No cached messages for $cacheKey, skipping older sync');
-        _isSyncingFirebaseOlder[cacheKey] = false;
-        return;
-      }
-
-      // Get oldest message timestamp
-      final oldestMessage = cachedMessages.last;
-      final oldestTimestamp = oldestMessage.timestamp;
-
-      // Fetch 11 older messages from Firebase
-      final olderMessages = await FirebaseRealtimeService.getOlderMessages(
-        chatId,
-        chatType,
-        oldestTimestamp,
-        11, // Fetch 11 messages per batch
-        currentUserId: currentUserId,
-        otherUserId: _resolveFirebaseOtherUserId(chatId, chatType, otherUserId),
-        attendanceGroup: isAttendanceGroup,
-      );
-
-      if (olderMessages.isEmpty) {
-        debugPrint('$TAG ✅ No more older messages in Firebase for $cacheKey');
-        _isSyncingFirebaseOlder[cacheKey] = false;
-        return;
-      }
-
-      // Cache older messages in background
-      final box = await _getMessageBox(cacheKey);
-      for (final message in olderMessages) {
-        await _putMessage(box, message);
-      }
-
-      debugPrint(
-          '🔄 Background synced ${olderMessages.length} older Firebase messages for $cacheKey');
-    } catch (e) {
-      debugPrint('$TAG ❌ Firebase older sync error: $e');
-    } finally {
-      _isSyncingFirebaseOlder[cacheKey] = false;
-    }
-  }
 
   /// Sync specific batch of older Firebase messages (for pagination)
   Future<List<Message>> syncOlderFirebaseMessages({

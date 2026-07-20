@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -25,6 +26,7 @@ import '../../core/services/api_service_simple.dart';
 import '../../core/services/chat_list_update_service.dart';
 import '../../core/services/chat_metadata_service.dart';
 import '../../core/services/firebase_realtime_service.dart';
+import '../../core/services/message_database_service.dart';
 import '../../core/utils/chat_utils.dart';
 import '../../core/services/image_cache_service.dart';
 import '../../core/services/media_compression_service.dart';
@@ -80,6 +82,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   // NEW: Message sync service for instant loading
   final MessageSyncService _syncService = MessageSyncService();
+  final MessageDatabaseService _dbService = MessageDatabaseService();
   final ChatMetadataService _metadataService = ChatMetadataService();
   final ImageCacheService _imageCacheService = ImageCacheService();
   // Guards against duplicate background image downloads per message
@@ -297,9 +300,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   /// Writes 'delivered' status to Firebase for all messages from other users
   /// that are still in 'sent' state. Called on chat open so the sender sees
   /// double grey tick even if the receiver was offline when the message arrived.
+  ///
+  /// Fast path (SQLite): when messages are already cached, checks status JSON
+  /// per row — zero Firebase reads.
+  /// Fallback (Firebase): when SQLite is empty (first open / cache miss), uses
+  /// the original full Firebase .get() so no messages are ever missed.
   void _markPendingMessagesAsDelivered() {
     if (_currentUserId == null || widget.chatType == 'group') return;
-    // Resolve the other user's ID: prefer _user['id'] if loaded, else widget.chatId
     final resolvedOtherUserId = _user?['id']?.toString().isNotEmpty == true
         ? _user!['id'].toString()
         : widget.chatId;
@@ -313,36 +320,68 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     // Run in background — never blocks UI
     unawaited(() async {
       try {
-        debugPrint("_markPendingMessagesAsDelivered $firebaseChatId");
+        debugPrint('_markPendingMessagesAsDelivered $firebaseChatId');
+        final db = await _dbService.database;
+        final rows = await db.rawQuery(
+          'SELECT id, firebase_id, sender_id, status FROM messages '
+          'WHERE chat_id = ? AND chat_type = ?',
+          [widget.chatId, widget.chatType],
+        );
+
+        if (rows.isNotEmpty) {
+          // Fast path: SQLite has messages — check status JSON, no Firebase read.
+          for (final row in rows) {
+            final senderId = row['sender_id']?.toString() ?? '';
+            if (senderId.isEmpty || senderId == _currentUserId) continue;
+
+            final statusJson = row['status']?.toString();
+            Map<String, dynamic> statusStrMap = {};
+            if (statusJson != null && statusJson.isNotEmpty) {
+              try {
+                statusStrMap = Map<String, dynamic>.from(
+                    jsonDecode(statusJson) as Map);
+              } catch (_) {}
+            }
+            final currentStatus = (statusStrMap[statusKey(_currentUserId!)] ??
+                statusStrMap[_currentUserId])?.toString();
+            // Only upgrade sent → delivered, never downgrade read → delivered
+            if (currentStatus != null && currentStatus != 'sent') continue;
+
+            final nodeKey = row['firebase_id']?.toString().isNotEmpty == true
+                ? row['firebase_id'].toString()
+                : row['id']?.toString() ?? '';
+            if (nodeKey.isEmpty || nodeKey.startsWith('temp_')) continue;
+
+            unawaited(FirebaseRealtimeService.database
+                .ref('chats/$firebaseChatId/messages/$nodeKey/status/${statusKey(_currentUserId!)}')
+                .set('delivered'));
+          }
+          debugPrint('✅ [Delivered] Marked pending messages as delivered in $firebaseChatId (SQLite path)');
+          return;
+        }
+
+        // Fallback: SQLite empty — use original Firebase full .get() so messages
+        // received while offline are not missed.
         final snapshot = await FirebaseRealtimeService.database
             .ref('chats/$firebaseChatId/messages')
             .get();
-
         if (!snapshot.exists || snapshot.value == null) return;
         final messagesMap = snapshot.value as Map?;
         if (messagesMap == null) return;
+
         for (final entry in messagesMap.entries) {
-          // debugPrint('✅ [Delivered] Marked pending messages as delivered in ${entry}');
           final msgData = entry.value;
           if (msgData is! Map) continue;
-          debugPrint('✅ [Delivered] Marked pending messages as delivered in ${msgData}');
           final senderId = msgData['senderId']?.toString() ??
               msgData['sender_id']?.toString() ?? '';
-          // Only process messages from other users
-
           if (senderId.isEmpty || senderId == _currentUserId) continue;
+
           final statusMap = msgData['status'];
-          debugPrint('✅ [Delivered] Marked pending messages as delivered infff ${statusMap}');
-          // Cast to Map<String, dynamic> so String key lookup works correctly.
-          // Firebase returns Map<dynamic, dynamic> — direct lookup with a String key returns null.
           final statusStrMap = statusMap is Map
               ? Map<String, dynamic>.from(statusMap)
               : null;
-          // Check both prefixed and raw key for backward compatibility
           final currentStatus = (statusStrMap?[statusKey(_currentUserId!)] ??
               statusStrMap?[_currentUserId])?.toString();
-          debugPrint('✅ [Delivered] Marked pending messages as delivered intttt ${currentStatus}');
-          // Only upgrade sent → delivered, never downgrade read → delivered
           if (currentStatus == null || currentStatus == 'sent') {
             unawaited(FirebaseRealtimeService.database
                 .ref('chats/$firebaseChatId/messages/${entry.key}/status/${statusKey(_currentUserId!)}')
@@ -354,7 +393,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             }
           }
         }
-        debugPrint('✅ [Delivered] Marked pending messages as delivered in $firebaseChatId');
+        debugPrint('✅ [Delivered] Marked pending messages as delivered in $firebaseChatId (Firebase fallback)');
       } catch (e) {
         debugPrint('❌ [Delivered] Error marking delivered: $e');
       }
@@ -463,27 +502,23 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             attendanceFlag,
           );
 
-      // Mark messages as read ONLY if online
+      // Mark messages as read ONLY if online — single call, no delayed duplicate
       if (hasInternet) {
-        Future.delayed(const Duration(milliseconds: 300), () {
-          if (mounted) {
-            FirebaseRealtimeService.markMessagesAsRead(
-                widget.chatType, widget.chatId, user.id,
-                currentUserId: _currentUserId,
-                otherUserId: _firebaseOtherUserId,
-                attendanceGroup: _isAttendanceGroup,
-                groupMembers: widget.chatType == 'group' && _user != null
-                    ? _user!['member_list']
-                    : null);
-
-            // Reset unread count again after Firebase marks messages read
-            ref.read(optimizedChatProvider.notifier).markAsRead(
-                  widget.chatId,
-                  widget.chatType,
-                  attendanceFlag,
-                );
-          }
-        });
+        if (mounted) {
+          FirebaseRealtimeService.markMessagesAsRead(
+              widget.chatType, widget.chatId, user.id,
+              currentUserId: _currentUserId,
+              otherUserId: _firebaseOtherUserId,
+              attendanceGroup: _isAttendanceGroup,
+              groupMembers: widget.chatType == 'group' && _user != null
+                  ? _user!['member_list']
+                  : null);
+          ref.read(optimizedChatProvider.notifier).markAsRead(
+                widget.chatId,
+                widget.chatType,
+                attendanceFlag,
+              );
+        }
       }
     } catch (e) {
       // if (mounted) {
@@ -1114,7 +1149,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         otherUserId: _firebaseOtherUserId,
         onMessages: (realtimeMessages) {
           debugPrint(
-              "🔥 Firebase messages received: ${realtimeMessages.length} messages");
+              "🔥 Firebase messages received: ${realtimeMessages
+                  .length} messages");
 
           if (realtimeMessages.isEmpty || !mounted) return;
 
@@ -1132,8 +1168,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             // Check if this is a status update for an existing message
             // (same firebaseId or msgId but status map changed) — must NOT be filtered
             final existingMsg = _messages.firstWhere(
-              (m) =>
-                  (m.firebaseId ?? m.id) == firebaseId ||
+                  (m) =>
+              (m.firebaseId ?? m.id) == firebaseId ||
                   (msg.msgId != null &&
                       msg.msgId!.isNotEmpty &&
                       msg.msgId != '0' &&
@@ -1142,8 +1178,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             );
             // If status changed (deep compare), keep the message so tick updates
             if (existingMsg != msg) {
-              final statusChanged = existingMsg.status.length != msg.status.length ||
-                  msg.status.entries.any((e) => existingMsg.status[e.key] != e.value);
+              final statusChanged = existingMsg.status.length !=
+                  msg.status.length ||
+                  msg.status.entries.any((e) =>
+                  existingMsg.status[e.key] != e.value);
               if (statusChanged) return true;
             }
 
@@ -1159,7 +1197,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
               // Match by timestamp + sender (for messages sent in last 10 seconds)
               if (existing.senderId == msg.senderId &&
                   existing.text == msg.text &&
-                  existing.timestamp.difference(msg.timestamp).abs().inSeconds <
+                  existing.timestamp
+                      .difference(msg.timestamp)
+                      .abs()
+                      .inSeconds <
                       10 &&
                   existing.firebaseId == null) {
                 return true;
@@ -1183,7 +1224,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
           final previousLength = _messages.length;
           debugPrint(
-              '🟡 [FIREBASE] Before merge: ${_messages.length} messages, adding ${filteredMessages.length} new');
+              '🟡 [FIREBASE] Before merge: ${_messages
+                  .length} messages, adding ${filteredMessages.length} new');
 
           setState(() {
             // Merge messages based on chat type
@@ -1196,7 +1238,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           });
 
           debugPrint(
-              '🟢 [FIREBASE] After merge: ${_messages.length} messages (was $previousLength)');
+              '🟢 [FIREBASE] After merge: ${_messages
+                  .length} messages (was $previousLength)');
           // Handle new incoming messages - auto-mark as read if user is actively viewing this chat
           if (_messages.length > previousLength &&
               filteredMessages.isNotEmpty) {
@@ -1210,11 +1253,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
                 // Update chat list with the message but mark as already read
                 ref.read(chatProvider.notifier).onMessageReceived(
-                      widget.chatId,
-                      widget.chatType,
-                      newMessage,
-                      true, // isRead = true because user is actively viewing
-                    );
+                  widget.chatId,
+                  widget.chatType,
+                  newMessage,
+                  true, // isRead = true because user is actively viewing
+                );
               }
             }
           }
@@ -1228,10 +1271,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         });
 
     _typingSubscription = FirebaseRealtimeService.getTypingUsers(
-            widget.chatId, widget.chatType,
-            currentUserId: _currentUserId,
-            attendanceGroup: _isAttendanceGroup,
-            otherUserId: _firebaseOtherUserId)
+        widget.chatId, widget.chatType,
+        currentUserId: _currentUserId,
+        attendanceGroup: _isAttendanceGroup,
+        otherUserId: _firebaseOtherUserId)
         .listen((typingData) {
       if (mounted) {
         final typingUsers = <String, bool>{};
@@ -1251,6 +1294,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       debugPrint('Typing stream error: $error');
     });
 
+    _presenceSubscription?.cancel();
+    // Use onChildChanged instead of onValue — presence node only has 2 fields
+    // (isOnline, lastSeen). onValue re-fires on every lastSeen heartbeat write,
+    // downloading the full node each time. onChildChanged fires only for the
+    // specific field that changed (~200B vs ~500B, and far fewer triggers).
+    if (widget.chatType != 'group' && _user != null) {
+      final otherUserId = _user!['id']?.toString();
+      if (otherUserId != null && otherUserId.isNotEmpty) {
     _presenceSubscription = FirebaseDatabase.instance
         .ref('presence/${widget.chatId}')
         .onValue
@@ -1258,14 +1309,27 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       if (mounted) {
         final value = event.snapshot.value;
         final presenceData =
-            value is Map ? Map<String, dynamic>.from(value) : null;
-        setState(() {
+        value is Map ? Map<String, dynamic>.from(value) : null;
+        // Only rebuild if online status actually changed — lastSeen updates
+        // alone should not trigger a full widget rebuild.
+        final newIsOnline = presenceData?['isOnline'] as bool? ?? false;
+        final currentIsOnline =
+            _onlineUsers[widget.chatId]?['isOnline'] as bool? ?? false;
+        if (newIsOnline != currentIsOnline || presenceData == null) {
+          setState(() {
+            _onlineUsers[widget.chatId] = presenceData;
+          });
+        } else {
+          // Update data without rebuild — lastSeen still needs to be current
+          // for the subtitle display when user taps the header.
           _onlineUsers[widget.chatId] = presenceData;
-        });
+        }
       }
     }, onError: (error) {
       debugPrint('Presence stream error: $error');
     });
+  }}
+
   }
 
   bool _canSendMessage() {
@@ -1567,7 +1631,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       try {
         final messageId = int.parse(msgId);
         if (messageId > 0) {
-          _apiService.markMessageAsRead(messageId);
+          // _apiService.markMessageAsRead(messageId);
           _markAsReadApiCallCount++;
           debugPrint('✅ API mark as read called for message: $messageId');
         }
@@ -1635,7 +1699,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       try {
         final messageId = int.parse(msgId);
         if (messageId > 0) {
-          _apiService.markMessageAsRead(messageId);
+          // _apiService.markMessageAsRead(messageId);
           _markAsReadApiCallCount++;
         }
       } catch (e) {
