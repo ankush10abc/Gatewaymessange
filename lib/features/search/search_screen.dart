@@ -6,6 +6,7 @@ import '../../app/theme/app_theme.dart';
 import '../../core/models/user_model.dart';
 import '../../core/services/api_service_simple.dart';
 import '../../core/storage/storage_service.dart';
+import '../../core/utils/app_debouncer.dart';
 import '../../core/utils/internet_checker.dart';
 import '../../shared/providers/auth_provider.dart';
 import '../../shared/widgets/profile_image_widget.dart';
@@ -158,7 +159,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
           ),
           style: const TextStyle(color: Colors.white),
           onChanged: (query) {
-            _searchUsers(query);
+            AppDebouncer.debounce('search_input', () => _searchUsers(query));
           },
         ),
       ),
@@ -198,15 +199,14 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
       title: Text(user.name),
       subtitle: Text(_getRoleDisplayName(user.role)),
       trailing:  Icon(Icons.chat, color: AppTheme.whatsAppGreen),
-      onTap: () {
+      onTap: () => AppDebouncer.run(() {
         // Navigate to chat with user
         if (user.actual_role == 'parent' || user.actual_role.toLowerCase() == 'admin' || user.actual_role.toLowerCase() == 'teacher') {
           context.push('/chat/${user.id}?type=user&name=${Uri.encodeComponent(user.name)}');
         }else{
           context.push('/chat/${user.id}?type=group&name=${Uri.encodeComponent(user.name)}');
         }
-
-      },
+      }, tag: 'search_user_${user.id}'),
     );
   }
 

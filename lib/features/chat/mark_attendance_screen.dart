@@ -10,7 +10,7 @@ import '../../core/services/firebase_realtime_service.dart';
 import '../../core/services/message_database_service.dart';
 import '../../core/services/time_service.dart';
 import '../../core/utils/chat_utils.dart';
-
+//{"sender_id":504,"group_id":1,"type":"text","content":"*Clockin 🕗 Successfully*\n*Status-* You are on Time\n*Remark-* ","status":"sent","updated_at":"2026-07-20T19:27:48.000000Z","created_at":"2026-07-21 00:57:48","id":5860,"file_url":null,"sender":{"id":504,"name":"Ankush","profile_picture":null},"group":{"id":1,"name":"Attendance Group"},"reply_to_message":null}
 class MarkAttendanceScreen extends StatefulWidget {
   final String groupId;
   final ApiService apiService;

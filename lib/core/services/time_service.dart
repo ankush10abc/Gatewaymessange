@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/cupertino.dart';
 
 class TimeService {
   static DateTime? _cachedTime;
@@ -8,6 +9,7 @@ class TimeService {
   static Future<DateTime> getCurrentTime() async {
     if (_cachedTime != null && _lastFetchTime != null) {
       final elapsed = DateTime.now().difference(_lastFetchTime!);
+      debugPrint("AnkushDateTime $elapsed");
       if (elapsed < _cacheDuration) {
         return _cachedTime!.add(elapsed);
       }
@@ -19,9 +21,10 @@ class TimeService {
         'https://timeapi.io/api/Time/current/zone',
         queryParameters: {'timeZone': 'Asia/Kolkata'},
       );
-
+      debugPrint("AnkushDateTime ${response.data['dateTime'] }");
       final dateTimeStr = response.data['dateTime'] as String;
-      _cachedTime = DateTime.parse(dateTimeStr);
+      // _cachedTime = DateTime.parse(dateTimeStr);
+      _cachedTime = DateTime.now();
       _lastFetchTime = DateTime.now();
       return _cachedTime!;
     } catch (e) {

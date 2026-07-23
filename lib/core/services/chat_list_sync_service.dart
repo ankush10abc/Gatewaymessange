@@ -146,10 +146,10 @@ class ChatListSyncService {
     if (_isInitialized && _currentUserId == userId) return;
     
     _currentUserId = userId;
-    _hiveDataSource = HiveChatDataSource(); // Singleton instance
-    _imageCacheService = ImageCacheService(); // Singleton instance
+    _hiveDataSource = HiveChatDataSource();
+    _imageCacheService = ImageCacheService();
     
-    await _hiveDataSource.initialize();
+    await _hiveDataSource.initialize(userId: userId);
     await _imageCacheService.initialize();
     _isInitialized = true;
     

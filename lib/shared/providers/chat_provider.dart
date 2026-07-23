@@ -90,6 +90,7 @@ class ChatNotifier extends StateNotifier<ChatState> {
         lastSyncTime: DateTime.now(),
       );
     } catch (e) {
+
       debugPrint('Background sync failed: $e');
       if (state.chats.isEmpty) {
         state = state.copyWith(error: e.toString(), isLoading: false);

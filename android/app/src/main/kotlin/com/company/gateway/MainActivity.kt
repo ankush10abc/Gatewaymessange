@@ -19,13 +19,13 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "startLocationService" -> {
                         // Start persistent notification when user logs in
-                        LocationForegroundService.start(this)
-                        result.success(null)
+                       // LocationForegroundService.start(this)
+                       // result.success(null)
                     }
                     "stopLocationService" -> {
                         // Remove notification when user logs out
-                        LocationForegroundService.stop(this)
-                        result.success(null)
+                      //  LocationForegroundService.stop(this)
+                      //  result.success(null)
                     }
                     else -> result.notImplemented()
                 }
@@ -37,13 +37,13 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "startForegroundService" -> {
                         // Start telemetry notification when user logs in
-                        TelemetryForegroundService.start(this)
-                        result.success(null)
+                       // TelemetryForegroundService.start(this)
+                      //  result.success(null)
                     }
                     "stopForegroundService" -> {
                         // Remove telemetry notification when user logs out
-                        TelemetryForegroundService.stop(this)
-                        result.success(null)
+                     //   TelemetryForegroundService.stop(this)
+                       // result.success(null)
                     }
                     else -> result.notImplemented()
                 }

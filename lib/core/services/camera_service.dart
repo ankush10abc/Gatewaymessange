@@ -26,26 +26,7 @@ class CameraService {
   }
 
   static Future<XFile?> pickFromGallery() async {
-    // Request storage permission
-    try {
-
-      final status = await Permission.photos.request();
-      if (!status.isGranted) {
-            throw Exception('Gallery permission denied');
-          }
-    } catch (e) {
-      // Android 12 corresponds to SDK 31
-      // if (androidInfo.version.sdkInt >= 31){
-        final status = await Permission.storage.request();
-        if (!status.isGranted) {
-          throw Exception('Gallery permission denied');
-        }
-      // }
-
-      print(e);
-    }
-
-
+    // API 29+: system photo picker handles access — no permission needed
     try {
       final XFile? image = await _picker.pickImage(
         source: ImageSource.gallery,

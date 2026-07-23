@@ -27,6 +27,7 @@ import '../../core/services/chat_list_update_service.dart';
 import '../../core/services/chat_metadata_service.dart';
 import '../../core/services/firebase_realtime_service.dart';
 import '../../core/services/message_database_service.dart';
+import '../../core/utils/app_debouncer.dart';
 import '../../core/utils/chat_utils.dart';
 import '../../core/services/image_cache_service.dart';
 import '../../core/services/media_compression_service.dart';
@@ -555,8 +556,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
       // Show in UI immediately — do NOT wait for Firebase/SQLite sync
       setState(() {
-        _messages = freshMessages;
-        _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+        _messages = _dedupMessages(freshMessages)
+          ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
       });
 
       // Sync to Firebase + SQLite in background (non-blocking)
@@ -594,25 +595,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         if (mounted) {
           setState(() {
             if (apiMessages.isNotEmpty) {
-              // Dedup against current UI messages by all known id fields
-              final existingIds = <String>{
-                for (final m in _messages) ...[
-                  if ((m.firebaseId ?? '').isNotEmpty) m.firebaseId!,
-                  if ((m.msgId ?? '').isNotEmpty && m.msgId != '0') m.msgId!,
-                  if (m.id.isNotEmpty && m.id != '0') m.id,
-                ],
-              };
-              final deduped = apiMessages.where((m) {
-                final fbId = m.firebaseId ?? '';
-                final mId = m.msgId ?? '';
-                return !existingIds.contains(fbId) &&
-                    !(mId.isNotEmpty &&
-                        mId != '0' &&
-                        existingIds.contains(mId)) &&
-                    !existingIds.contains(m.id);
-              }).toList();
-              _messages.addAll(deduped);
-              _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+              _messages.addAll(apiMessages);
+              _messages = _dedupMessages(_messages)
+                ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
             }
             pageCount = nextPage;
             _loadedBatchCount++;
@@ -657,21 +642,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
         if (mounted) {
           setState(() {
-            final existingIds = <String>{
-              for (final m in _messages) ...[
-                if ((m.firebaseId ?? '').isNotEmpty) m.firebaseId!,
-                if ((m.msgId ?? '').isNotEmpty) m.msgId!,
-                if (m.id.isNotEmpty) m.id,
-              ],
-            };
-            final deduped = apiMessages
-                .where((m) =>
-                    !existingIds.contains(m.firebaseId ?? '') &&
-                    !existingIds.contains(m.msgId ?? '') &&
-                    !existingIds.contains(m.id))
-                .toList();
-            _messages.addAll(deduped);
-            _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+            _messages.addAll(apiMessages);
+            _messages = _dedupMessages(_messages)
+              ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
             pageCount = nextPage;
             _loadedBatchCount++;
             _isLoadingOldMessages = false;
@@ -748,16 +721,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         '✅ Loaded cached metadata: name=${_user?['name']}, attendance=$_isAttendanceGroup');
   }
 
+  // Timestamp of the last Firebase listener setState — used to suppress
+  // cache watcher emissions that are direct echoes of Firebase writes.
+  DateTime? _lastFirebaseWriteTime;
+
   void _setupCacheWatcher() {
     _cacheSubscription?.cancel();
-    // Attendance groups use the API as authoritative source — the cache watcher
-    // must not merge stale Hive data on top of fresh API results.
-    // For attendance groups we skip the watcher entirely; _syncAttendanceGroupFromApi
-    // always replaces _messages directly via setState.
+    // Attendance groups use the API as authoritative source — skip watcher.
     if (_isAttendanceGroup == true) return;
 
-    // Skip the first emission — it always mirrors what _loadInitialMessages
-    // already rendered via setState, so acting on it causes a duplicate rebuild.
+    // Skip the first emission — mirrors what _loadInitialMessages already rendered.
     bool isFirstEmission = true;
     _cacheSubscription = _syncService
         .watchMessages(
@@ -768,23 +741,38 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       isAttendanceGroup: _isAttendanceGroup,
     )
         .listen((cachedMessages) {
-      // Skip first emission — already shown by _loadInitialMessages setState
       if (isFirstEmission) {
         isFirstEmission = false;
         return;
       }
       if (!mounted) return;
-      // Skip if cache is empty and we already have messages — background
-      // writes (e.g. status updates) should not clear the UI.
       if (cachedMessages.isEmpty && _messages.isNotEmpty) return;
 
-      // Compute the merged list first WITHOUT touching setState.
+      // Suppress cache emissions that are echoes of a recent Firebase write.
+      // Firebase listener writes to Hive → Hive stream fires → without this
+      // guard the same messages get merged a second time causing duplicates.
+      final lastWrite = _lastFirebaseWriteTime;
+      if (lastWrite != null &&
+          DateTime.now().difference(lastWrite).inMilliseconds < 2000) {
+        // Only allow through if it carries status updates not yet in _messages
+        final hasNewStatus = cachedMessages.any((cm) {
+          final existing = _messages.firstWhere(
+            (m) =>
+                (m.firebaseId != null && m.firebaseId == cm.firebaseId) ||
+                (m.msgId != null && m.msgId == cm.msgId && cm.msgId != '0'),
+            orElse: () => cm,
+          );
+          if (identical(existing, cm)) return false; // not found
+          return existing.status.length != cm.status.length ||
+              cm.status.entries.any((e) => existing.status[e.key] != e.value);
+        });
+        if (!hasNewStatus) return;
+      }
+
       final merged = _messages.isEmpty
-          ? cachedMessages
+          ? _dedupMessages(cachedMessages)
           : _mergeMessages(_messages, cachedMessages);
 
-      // Skip rebuild entirely if the visible message set hasn't changed.
-      // Compare by stable IDs so minor metadata changes don't cause re-renders.
       if (!_hasMessageListChanged(_messages, merged)) return;
 
       final wasAtBottom = _isAtBottom;
@@ -792,7 +780,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         _messages = merged;
       });
 
-      // Only auto-scroll if user was already at the bottom before the update
       if (wasAtBottom) {
         WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
       }
@@ -869,7 +856,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       // This prevents the old→new→old flicker entirely.
       if (mounted && _isAttendanceGroup != true) {
         setState(() {
-          _messages = cachedMessages;
+          _messages = _dedupMessages(cachedMessages);
           _loadedBatchCount = (cachedMessages.length / 25).ceil();
         });
       } else if (mounted) {
@@ -1005,7 +992,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           if (!append) {
             // Replace entirely — API page-1 is the authoritative fresh list.
             // This prevents old cached messages from being mixed with new ones.
-            _messages = freshMessages
+            _messages = _dedupMessages(freshMessages)
               ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
           } else {
             // Paginating: append only genuinely new messages
@@ -1154,6 +1141,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
           if (realtimeMessages.isEmpty || !mounted) return;
 
+          // Record the time of this Firebase write so _setupCacheWatcher
+          // can suppress the echo emission from Hive (prevents duplicates).
+          _lastFirebaseWriteTime = DateTime.now();
+
           // Filter out messages that were just sent by current user
           // to prevent duplicates from optimistic UI updates.
           // NOTE: Do NOT filter messages that have status updates (same firebaseId
@@ -1230,8 +1221,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           setState(() {
             // Merge messages based on chat type
             if (_isAttendanceGroup == true) {
-              _messages = filteredMessages;
-              _messages.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+              _messages = _dedupMessages(filteredMessages)
+                ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
             } else {
               _messages = _mergeMessages(_messages, filteredMessages);
             }
@@ -1405,107 +1396,147 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
   List<Message> _mergeMessages(
       List<Message> apiMessages, List<Message> realtimeMessages) {
-    // Primary map: keyed by firebaseId (push key) for Firebase messages,
-    // or by msgId for API-only messages (no firebaseId).
-    // This ensures Firebase status updates always merge into the correct message
-    // even when the existing message was loaded from API without a firebaseId.
+    // Primary map keyed by the most stable identifier available.
+    // Priority: firebaseId > msgId-prefixed > temp_ id > api_ id
     final messageMap = <String, Message>{};
 
-    // Build secondary index: msgId → map key, so Firebase messages can find
-    // their API-loaded counterpart by server numeric ID.
+    // Secondary index: msgId → current map key (updated as keys change)
     final msgIdToKey = <String, String>{};
 
     for (final message in apiMessages) {
-      // Prefer firebaseId as key; fall back to msgId, then id
-      final key = (message.firebaseId?.isNotEmpty == true)
-          ? message.firebaseId!
-          : (message.msgId?.isNotEmpty == true && message.msgId != '0')
-              ? 'msgid_${message.msgId}'
-              : (message.id.startsWith('temp_') ? message.id : 'api_${message.id}');
+      final key = _stableKey(message);
       messageMap[key] = message;
-      // Index by msgId so incoming Firebase messages can find this entry
-      if (message.msgId != null && message.msgId!.isNotEmpty && message.msgId != '0') {
-        msgIdToKey[message.msgId!] = key;
+      final mid = message.msgId;
+      if (mid != null && mid.isNotEmpty && mid != '0') {
+        msgIdToKey[mid] = key;
       }
     }
 
     for (final message in realtimeMessages) {
       final firebaseId = message.firebaseId;
       if (firebaseId != null && firebaseId.isNotEmpty) {
-        // Remove temp message if exists (optimistic UI replacement)
+        // Remove matching temp bubble (optimistic UI replacement)
+        // Match by senderId + text + recency to avoid false positives
         final tempKey = messageMap.keys.firstWhere(
-          (k) => k.startsWith('temp_') && messageMap[k]?.text == message.text,
+          (k) {
+            if (!k.startsWith('temp_')) return false;
+            final t = messageMap[k]!;
+            return t.senderId == message.senderId &&
+                t.text == message.text &&
+                t.type == message.type &&
+                message.timestamp.difference(t.timestamp).abs().inSeconds < 30;
+          },
           orElse: () => '',
         );
         if (tempKey.isNotEmpty) messageMap.remove(tempKey);
 
-        // Try direct firebaseId match first
+        // Find existing entry by firebaseId or msgId
         String? existingKey;
         if (messageMap.containsKey(firebaseId)) {
           existingKey = firebaseId;
-        } else if (message.msgId != null &&
-            message.msgId!.isNotEmpty &&
-            message.msgId != '0' &&
-            msgIdToKey.containsKey(message.msgId)) {
-          // Firebase message matches an API-loaded message by msgId —
-          // this is the key fix: status updates now propagate to the sender's UI
-          // even when the existing message was loaded from API without a firebaseId.
-          existingKey = msgIdToKey[message.msgId];
+        } else {
+          final mid = message.msgId;
+          if (mid != null && mid.isNotEmpty && mid != '0' && msgIdToKey.containsKey(mid)) {
+            existingKey = msgIdToKey[mid];
+          }
         }
 
         if (existingKey != null) {
           final existing = messageMap[existingKey]!;
           final mergedStatus = _mergeStatus(existing.status, message.status);
-          // Replace with Firebase version (has firebaseId) but keep merged status
-          // and prefer the API id if it's a real server id
           final merged = message.copyWith(
             status: mergedStatus,
-            // Keep the real server id from the API-loaded message if available
             id: (existing.id.isNotEmpty &&
                     !existing.id.startsWith('temp_') &&
                     existing.id != '0')
                 ? existing.id
                 : message.id,
           );
-          // Re-key under firebaseId so future updates always find it
+          // Re-key under firebaseId — single canonical key going forward
           messageMap.remove(existingKey);
           messageMap[firebaseId] = merged;
-          // Update msgId index to point to new key
-          if (message.msgId != null && message.msgId!.isNotEmpty) {
-            msgIdToKey[message.msgId!] = firebaseId;
-          }
+          final mid = message.msgId;
+          if (mid != null && mid.isNotEmpty) msgIdToKey[mid] = firebaseId;
         } else {
           messageMap[firebaseId] = message;
+          final mid = message.msgId;
+          if (mid != null && mid.isNotEmpty && mid != '0') msgIdToKey[mid] = firebaseId;
         }
       } else if (message.id.startsWith('temp_')) {
         messageMap[message.id] = message;
       }
     }
 
-    // Build final deduplicated list
-    final firebaseIdToItem = <String, Message>{};
-    for (final item in messageMap.values) {
-      final firebaseId = item.firebaseId;
-      if (firebaseId != null && firebaseId.isNotEmpty) {
-        if (item.id != '0' && !item.id.startsWith('temp_')) {
-          firebaseIdToItem[firebaseId] = item;
-        } else if (!firebaseIdToItem.containsKey(firebaseId)) {
-          firebaseIdToItem[firebaseId] = item;
-        }
-      } else if (item.id.startsWith('temp_')) {
-        firebaseIdToItem[item.id] = item;
-      } else {
-        // API-only messages with no firebaseId — keep under stable key
-        final stableKey = (item.msgId?.isNotEmpty == true && item.msgId != '0')
-            ? 'msgid_${item.msgId}'
-            : 'api_${item.id}';
-        firebaseIdToItem[stableKey] = item;
+    // Final dedup: collapse any remaining entries that share the same msgId
+    // (can happen when API-loaded 'msgid_X' and Firebase 'firebaseId' both
+    // survived the loop for the same logical message).
+    final seenMsgIds = <String>{};
+    final deduped = <String, Message>{};
+    // Prefer firebaseId-keyed entries over msgid_-keyed ones
+    final sorted = messageMap.entries.toList()
+      ..sort((a, b) {
+        final aIsFirebase = !a.key.startsWith('msgid_') && !a.key.startsWith('api_') && !a.key.startsWith('temp_');
+        final bIsFirebase = !b.key.startsWith('msgid_') && !b.key.startsWith('api_') && !b.key.startsWith('temp_');
+        if (aIsFirebase && !bIsFirebase) return -1;
+        if (!aIsFirebase && bIsFirebase) return 1;
+        return 0;
+      });
+    for (final entry in sorted) {
+      final item = entry.value;
+      final mid = item.msgId;
+      if (mid != null && mid.isNotEmpty && mid != '0') {
+        if (seenMsgIds.contains(mid)) continue; // duplicate — skip
+        seenMsgIds.add(mid);
       }
+      deduped[entry.key] = item;
     }
 
-    final mergedList = firebaseIdToItem.values.toList();
+    final mergedList = deduped.values.toList();
     mergedList.sort((a, b) => b.timestamp.compareTo(a.timestamp));
     return mergedList;
+  }
+
+  /// Removes duplicate messages from [list] keeping the best entry per logical message.
+  /// A message is a duplicate if it shares the same non-empty msgId OR firebaseId
+  /// with another entry. Firebase-keyed entries are preferred over temp/api entries.
+  List<Message> _dedupMessages(List<Message> list) {
+    final seenFirebaseIds = <String>{};
+    final seenMsgIds = <String>{};
+    // Sort so firebase-keyed entries come first (they win over temp/api entries)
+    final sorted = list.toList()
+      ..sort((a, b) {
+        final aIsTemp = a.id.startsWith('temp_');
+        final bIsTemp = b.id.startsWith('temp_');
+        if (!aIsTemp && bIsTemp) return -1;
+        if (aIsTemp && !bIsTemp) return 1;
+        return 0;
+      });
+    final result = <Message>[];
+    for (final msg in sorted) {
+      final fbId = msg.firebaseId?.trim();
+      final mId = msg.msgId?.trim();
+      // Check firebaseId collision
+      if (fbId != null && fbId.isNotEmpty) {
+        if (seenFirebaseIds.contains(fbId)) continue;
+        seenFirebaseIds.add(fbId);
+      }
+      // Check msgId collision
+      if (mId != null && mId.isNotEmpty && mId != '0') {
+        if (seenMsgIds.contains(mId)) continue;
+        seenMsgIds.add(mId);
+      }
+      result.add(msg);
+    }
+    return result;
+  }
+
+  /// Returns the most stable map key for a message.
+  String _stableKey(Message message) {
+    if (message.firebaseId?.isNotEmpty == true) return message.firebaseId!;
+    if (message.id.startsWith('temp_')) return message.id;
+    final mid = message.msgId;
+    if (mid != null && mid.isNotEmpty && mid != '0') return 'msgid_$mid';
+    return 'api_${message.id}';
   }
 
   void _onScroll() {
@@ -1880,6 +1911,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     String? fileUrl,
     String? fileName,
     int? fileSize,
+    bool skipOptimisticInsert = false,
   }) async {
     print("neewnwnwnwaaaa $text");
     if (_currentUserId == null) return;
@@ -1934,14 +1966,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     );
 
     print("neewnwnwnwaaaa ${message.toJson()}");
-    // Optimistic UI update - add message immediately
-    if (mounted) {
+    // Optimistic UI update - add message immediately (skip for media uploads
+    // which already show a preview bubble before calling _sendMessage)
+    if (mounted && !skipOptimisticInsert) {
       setState(() {
         _messages.insert(0, message);
         _replyToMessage = null;
         debugPrint(
             '🟢 [SEND] Step 1: Added temp message. Total messages: ${_messages.length}');
       });
+    } else if (mounted) {
+      setState(() => _replyToMessage = null);
     }
 
     // Cache message immediately with reply data
@@ -1975,6 +2010,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       );
 
       // Update UI: remove temp message and add real message (single setState)
+      // When skipOptimisticInsert=true the preview bubble was already removed
+      // by the media handler before calling _sendMessage, so we just insert
+      // the real message directly without a remove step.
       if (mounted) {
         setState(() {
           debugPrint(
@@ -1982,10 +2020,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
           debugPrint(
               '🟡 [SEND] Temp ID: $tempId, Real ID: ${sentMessage.id}, Firebase ID: ${sentMessage.firebaseId}');
 
-          _messages = _mergeMessages(
-            _messages.where((item) => item.id != tempId).toList(),
-            [sentMessage],
-          );
+          if (skipOptimisticInsert) {
+            // No temp bubble to remove — just merge the real message in
+            _messages = _mergeMessages(_messages, [sentMessage]);
+          } else {
+            _messages = _mergeMessages(
+              _messages.where((item) => item.id != tempId).toList(),
+              [sentMessage],
+            );
+          }
 
           debugPrint(
               '🟢 [SEND] Step 2: After merge. Messages count: ${_messages.length}');
@@ -2167,6 +2210,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         fileUrl: uploadResponse.filePath,
         fileName: uploadResponse.fileName,
         fileSize: uploadResponse.fileSize,
+        skipOptimisticInsert: true,
       );
     } catch (e) {
       if (mounted)
@@ -2227,6 +2271,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         fileUrl: uploadResponse.filePath,
         fileName: uploadResponse.fileName,
         fileSize: uploadResponse.fileSize,
+        skipOptimisticInsert: true,
       );
     } catch (e) {
       if (mounted)
@@ -2364,6 +2409,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         fileUrl: uploadResponse.filePath,
         fileName: uploadResponse.fileName,
         fileSize: uploadResponse.fileSize,
+        skipOptimisticInsert: true,
       );
     } catch (e) {
       if (mounted)
@@ -2422,6 +2468,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         fileUrl: uploadResponse.filePath,
         fileName: uploadResponse.fileName,
         fileSize: uploadResponse.fileSize,
+        skipOptimisticInsert: true,
       );
     } catch (e) {
       if (mounted)
@@ -2437,56 +2484,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     }
   }
 
-  /// Returns true if the required media permission is granted for the current SDK.
-  /// - API 34+ (Android 14+) : READ_MEDIA_IMAGES + READ_MEDIA_VIDEOS or partial READ_MEDIA_VISUAL_USER_SELECTED
-  /// - API 33  (Android 13)  : READ_MEDIA_IMAGES + READ_MEDIA_VIDEOS
-  /// - API 30-32 (Android 11-12): scoped storage — image_picker works without permission
-  /// - API 29  (Android 10)  : scoped storage — image_picker works without permission
-  /// - API <29 (Android 9-)  : READ_EXTERNAL_STORAGE
+  /// Android Photo Picker (API 29+) requires NO runtime permission.
+  /// image_picker uses the system photo picker automatically on API 29+.
+  /// Only Android 9 and below (API < 29) needs READ_EXTERNAL_STORAGE.
   Future<bool> _requestMediaPermission({bool forVideo = false}) async {
     if (!Platform.isAndroid) return true;
-
     final sdkInt = (await DeviceInfoPlugin().androidInfo).version.sdkInt;
-
-    if (sdkInt >= 34) {
-      // Android 14+ (API 34, 35, 36...)
-      // Request both granular permissions; partial (user-selected) is also acceptable.
-      final images = await Permission.photos.request();
-      final videos = forVideo ? await Permission.videos.request() : images;
-
-      // Full access granted
-      if (images.isGranted && videos.isGranted) return true;
-
-      // Partial / limited access — image_picker can still work with user-selected media
-      if (images.isLimited || videos.isLimited) return true;
-
-      if (images.isPermanentlyDenied || videos.isPermanentlyDenied) {
-        if (mounted) _showPermissionSettingsDialog('Photos & Videos');
-        return false;
-      }
+    if (sdkInt >= 29) return true; // Scoped storage / system photo picker — no permission needed
+    final status = await Permission.storage.request();
+    if (status.isPermanentlyDenied) {
+      if (mounted) _showPermissionSettingsDialog('Storage');
       return false;
-    } else if (sdkInt == 33) {
-      // Android 13 (API 33)
-      final images = await Permission.photos.request();
-      final videos = forVideo ? await Permission.videos.request() : images;
-      if (images.isGranted && videos.isGranted) return true;
-      if (images.isPermanentlyDenied || videos.isPermanentlyDenied) {
-        if (mounted) _showPermissionSettingsDialog('Photos & Videos');
-        return false;
-      }
-      return false;
-    } else if (sdkInt >= 29) {
-      // Android 10, 11, 12 (API 29-32): scoped storage, no permission needed for image_picker
-      return true;
-    } else {
-      // Android 9 and below (API < 29)
-      final status = await Permission.storage.request();
-      if (status.isPermanentlyDenied) {
-        if (mounted) _showPermissionSettingsDialog('Storage');
-        return false;
-      }
-      return status.isGranted;
     }
+    return status.isGranted;
   }
 
   Future<bool> _requestCameraPermission() async {
@@ -3024,17 +3034,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             automaticallyImplyLeading: true,
             leading: IconButton(
               icon: const Icon(Icons.arrow_back),
-              onPressed: () {
+              onPressed: () => AppDebouncer.run(() {
                 _makeAsRead();
                 if (Navigator.canPop(context)) {
                   Navigator.pop(context, true);
                 } else {
                   context.go('/home');
                 }
-              },
+              }, tag: 'chat_back'),
             ),
             title: GestureDetector(
-              onTap: () {
+              onTap: () => AppDebouncer.run(() {
                 if (_user == null) return;
                 Navigator.push(
                   context,
@@ -3062,7 +3072,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                     ),
                   ),
                 );
-              },
+              }, tag: 'chat_header_info'),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.start,
                 children: [
@@ -3112,17 +3122,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                   icon: const Icon(Icons.arrow_upward),
                   onPressed: _searchResults.isEmpty
                       ? null
-                      : _navigateToPreviousSearchResult,
+                      : () => AppDebouncer.run(_navigateToPreviousSearchResult, tag: 'search_prev'),
                 ),
                 IconButton(
                   icon: const Icon(Icons.arrow_downward),
                   onPressed: _searchResults.isEmpty
                       ? null
-                      : _navigateToNextSearchResult,
+                      : () => AppDebouncer.run(_navigateToNextSearchResult, tag: 'search_next'),
                 ),
                 IconButton(
                   icon: const Icon(Icons.close),
-                  onPressed: () {
+                  onPressed: () => AppDebouncer.run(() {
                     setState(() {
                       _isSearching = false;
                       _searchQuery = '';
@@ -3131,17 +3141,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                       _searchController.clear();
                       _highlightedMessageId = null;
                     });
-                  },
+                  }, tag: 'search_close'),
                 ),
               ] else
                 PopupMenuButton<String>(
-                  onSelected: (value) {
+                  onSelected: (value) => AppDebouncer.run(() {
                     if (value == 'search') {
                       setState(() {
                         _isSearching = true;
                       });
                     }
-                  },
+                  }, tag: 'chat_menu'),
                   itemBuilder: (context) => [
                     PopupMenuItem(
                         value: 'search',
@@ -3213,8 +3223,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                     padding:
                         const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     child: ElevatedButton.icon(
-                      onPressed:
-                          _isLoadingOldMessages ? null : _syncOldMessages,
+                      onPressed: _isLoadingOldMessages
+                          ? null
+                          : () => AppDebouncer.run(_syncOldMessages, tag: 'sync_old'),
                       icon: _isLoadingOldMessages
                           ? const SizedBox(
                               width: 16,
@@ -3326,11 +3337,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                     child: SizedBox(
                       width: double.infinity, // 👈 Makes button full width
                       child: ElevatedButton.icon(
-                        onPressed: () async {
+                        onPressed: () => AppDebouncer.run(() async {
                           if (userRole.toString().toLowerCase() != 'teacher') {
                             return;
                           }
-
                           final result = await Navigator.push(
                             context,
                             MaterialPageRoute(
@@ -3346,10 +3356,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                                   content: Text(
                                       'Attendance marked successfully. Please wait while the chat is loading')),
                             );
-                            // Reset page and refresh attendance data
                             await _refreshAfterAttendance();
                           }
-                        },
+                        }, tag: 'mark_attendance'),
                         icon: const Icon(Icons.check_circle),
                         label: const Text(' Mark Attendance '),
                         style: ElevatedButton.styleFrom(
@@ -3391,13 +3400,18 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                               }
                               return;
                             }
-                            _sendMessage(text: text);
+                            // Debounce send to prevent double-tap duplicate messages
+                            AppDebouncer.run(() => _sendMessage(text: text), tag: 'send_msg');
                           },
-                          onPickCamera:
-                              _canSendAttachments() ? _pickCamera : null,
-                          onPickImage:
-                              _canSendAttachments() ? _pickGallery : null,
-                          onPickFile: _canSendAttachments() ? _pickFile : null,
+                          onPickCamera: _canSendAttachments()
+                              ? () => AppDebouncer.run(_pickCamera, tag: 'pick_camera')
+                              : null,
+                          onPickImage: _canSendAttachments()
+                              ? () => AppDebouncer.run(_pickGallery, tag: 'pick_gallery')
+                              : null,
+                          onPickFile: _canSendAttachments()
+                              ? () => AppDebouncer.run(_pickFile, tag: 'pick_file')
+                              : null,
                           onTypingChanged: (isTyping) {
                             if (_currentUserId != null) {
                               FirebaseRealtimeService.setTyping(widget.chatType,
@@ -3528,7 +3542,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                     ),
                   ),
                   child: GestureDetector(
-                    onLongPress: () => _showMessageOptions(message),
+                    onLongPress: () => AppDebouncer.run(
+                      () => _showMessageOptions(message),
+                      tag: 'msg_options_${message.id}',
+                    ),
                     child: Container(
                       constraints: BoxConstraints(
                         maxWidth: MediaQuery.of(context).size.width * 0.75,
@@ -3660,12 +3677,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     final replyType = replyMessage.type;
 
     return GestureDetector(
-      onTap: () {
+      onTap: () => AppDebouncer.run(() {
         debugPrint('Jump to message called wi ${replyMessage.id}');
         if (replyMessage.id.isNotEmpty) {
           _jumpToMessage(replyMessage.id);
         }
-      },
+      }, tag: 'reply_jump_${replyMessage.id}'),
       child: Container(
         padding: const EdgeInsets.all(8),
         margin: const EdgeInsets.only(bottom: 8),
@@ -3892,6 +3909,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     return _remoteMediaUrl(mediaPath);
   }
 
+
   Widget _buildResolvedImage({
     required String source,
     required BoxFit fit,
@@ -3912,8 +3930,10 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
         );
 
     if (source.isEmpty) return fallback;
-
+    debugPrint("_localCachedImagePath $source");
+    debugPrint("_localCachedImagePath ${_isExistingLocalFile(source)}");
     if (_isExistingLocalFile(source)) {
+
       return Image.file(
         File(source),
         fit: fit,
@@ -4510,12 +4530,12 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
     if (_replyToMessage == null) return const SizedBox.shrink();
 
     return GestureDetector(
-      onTap: () {
+      onTap: () => AppDebouncer.run(() {
         if (_replyToMessage!.msgId != null &&
             _replyToMessage!.msgId!.isNotEmpty) {
           _jumpToMessage(_replyToMessage!.msgId!);
         }
-      },
+      }, tag: 'reply_preview_jump'),
       child: Container(
         padding: const EdgeInsets.all(12),
         margin: const EdgeInsets.symmetric(horizontal: 8),
@@ -4576,31 +4596,31 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             ListTile(
               leading: const Icon(Icons.reply),
               title: const Text('Reply'),
-              onTap: () {
+              onTap: () => AppDebouncer.run(() {
                 Navigator.pop(context);
                 setState(() {
                   _replyToMessage = message;
                 });
-              },
+              }, tag: 'msg_reply_${message.id}'),
             ),
             ListTile(
               leading: const Icon(Icons.copy),
               title: const Text('Copy'),
-              onTap: () {
+              onTap: () => AppDebouncer.run(() {
                 Navigator.pop(context);
                 Clipboard.setData(ClipboardData(text: message.text));
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('Message copied')),
                 );
-              },
+              }, tag: 'msg_copy_${message.id}'),
             ),
             ListTile(
               leading: const Icon(Icons.forward),
               title: const Text('Forward'),
-              onTap: () {
+              onTap: () => AppDebouncer.run(() {
                 Navigator.pop(context);
                 _showForwardDialog(message);
-              },
+              }, tag: 'msg_forward_${message.id}'),
             ),
           ],
         ),

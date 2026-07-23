@@ -14,6 +14,7 @@ import '../../core/services/chat_list_manager.dart';
 import '../../core/services/chat_list_update_service.dart';
 import '../../core/services/deep_link_service.dart';
 import '../../core/services/firebase_message_listener.dart';
+import '../../core/utils/app_debouncer.dart';
 import '../../core/utils/internet_checker.dart';
 import '../../shared/providers/auth_provider.dart';
 import '../../shared/providers/optimized_chat_provider.dart';
@@ -207,10 +208,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
           if (!_isSearching)
             IconButton(
               icon: const Icon(Icons.search),
-              onPressed: () async {
+              onPressed: () => AppDebouncer.run(() async {
                 await context.push('/search');
                 ref.read(optimizedChatProvider.notifier).refresh();
-              },
+              }, tag: 'home_search'),
             ),
           if (_isSearching)
             IconButton(
@@ -223,7 +224,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
               },
             ),
           PopupMenuButton<String>(
-            onSelected: (value) async {
+            onSelected: (value) => AppDebouncer.run(() async {
               switch (value) {
                 case 'profile':
                   await context.push('/profile');
@@ -233,7 +234,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                   ref.read(authProvider.notifier).logout();
                   break;
               }
-            },
+            }, tag: 'home_menu_$value'),
             itemBuilder: (context) => [
               PopupMenuItem(
                 value: 'profile',
@@ -285,9 +286,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         ),
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          _showNewChatDialog(context, authState.user!.role);
-        },
+        onPressed: () => AppDebouncer.run(
+          () => _showNewChatDialog(context, authState.user!.role),
+          tag: 'home_fab',
+        ),
         child: const Icon(Icons.chat),
       ),
     );
@@ -374,9 +376,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             ),
             const SizedBox(height: 24),
             ElevatedButton.icon(
-              onPressed: () {
-                ref.read(optimizedChatProvider.notifier).refresh();
-              },
+              onPressed: () => AppDebouncer.run(
+                () => ref.read(optimizedChatProvider.notifier).refresh(),
+                tag: 'home_retry',
+              ),
               icon: const Icon(Icons.refresh),
               label: const Text('Retry'),
               style: ElevatedButton.styleFrom(
@@ -445,7 +448,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         ? const SizedBox.shrink()
         : ListTile(
             key: ValueKey(chat.getUniqueKey()),
-            onTap: () async {
+            onTap: () => AppDebouncer.run(() async {
               // Mark as read immediately — clears badge before entering chat
               // so the home screen badge is 0 when user returns.
               // Do NOT call refresh() after returning: it races with markAsRead
@@ -468,7 +471,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
               }
               // No refresh() here — markAsRead already zeroed the badge in Hive
               // and Firebase listeners keep the list live in real time.
-            },
+            }, tag: 'chat_tile_${chat.id}'),
             onLongPress: () => _showChatOptions(chat),
             leading: Stack(
               children: [
@@ -597,7 +600,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
               leading: Icon(
                   chat.isPinned ? Icons.push_pin_outlined : Icons.push_pin),
               title: Text(chat.isPinned ? 'Unpin Chat' : 'Pin Chat'),
-              onTap: () {
+              onTap: () => AppDebouncer.run(() {
                 ref.read(optimizedChatProvider.notifier).togglePin(
                       chat.id,
                       chat.type,
@@ -605,18 +608,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                       attendanceGroup: chat.attendanceGroup == true,
                     );
                 Navigator.pop(context);
-              },
+              }, tag: 'pin_${chat.id}'),
             ),
             if (chat.unreadCount > 0)
               ListTile(
                 leading: const Icon(Icons.done_all),
                 title: const Text('Mark as Read'),
-                onTap: () {
+                onTap: () => AppDebouncer.run(() {
                   ref
                       .read(optimizedChatProvider.notifier)
                       .markAsRead(chat.id, chat.type, chat.attendanceGroup);
                   Navigator.pop(context);
-                },
+                }, tag: 'mark_read_${chat.id}'),
               ),
           ],
         ),
@@ -644,11 +647,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
               leading: const Icon(Icons.person_add),
               title: const Text('New Chat'),
               subtitle: const Text('Start a conversation'),
-              onTap: () async {
+              onTap: () => AppDebouncer.run(() async {
                 Navigator.pop(context);
                 await context.push('/search');
                 ref.read(optimizedChatProvider.notifier).refresh();
-              },
+              }, tag: 'new_chat_search'),
             ),
           ],
         ),

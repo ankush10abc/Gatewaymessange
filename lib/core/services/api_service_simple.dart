@@ -348,6 +348,17 @@ class ApiService {
         debugPrint('Status Code: ${error.response?.statusCode}');
         debugPrint('Headers: ${error.requestOptions.headers}');
 
+        if(error.response?.statusCode == 401 && error.requestOptions.uri.toString().contains('chat-list')){
+          if (onUnauthorized != null) {
+            // Fallback: use existing unauthorized handler
+            onUnauthorized!();
+          }
+          if (!_sessionDisplacedHandled) {
+            _sessionDisplacedHandled = true;
+            await _handleSessionDisplaced();
+
+          }
+        }
         if (error.requestOptions.data != null) {
           if (error.requestOptions.data is FormData) {
             debugPrint('Request Data: FormData (${(error.requestOptions.data as FormData).fields.length} fields)');
@@ -368,7 +379,7 @@ class ApiService {
         // is extracted and shown to the user. Interceptor retry/logout logic
         // must never interfere with login failures.
         final path = error.requestOptions.path;
-        if (path.contains('/api/ping') || path.contains('/api/login')) {
+        if (path.contains('/api/ping') || path.contains('/api/login') || path.contains('/api/logout')) {
           return handler.next(error);
         }
 
@@ -398,7 +409,7 @@ class ApiService {
         // ── Case 2: HTTP 401 with any other error code (token_invalid, etc.) ──
         // Temporary server-side auth failure — ping first, then retry once.
         // NEVER auto-logout without a successful ping + confirmed retry failure.
-        if (statusCode == 401) {
+        if (statusCode! >= 401) {
           final pingOk = await _pingServer();
           if (pingOk == false) {
             // Server is down — do NOT logout, show connection error
@@ -428,7 +439,7 @@ class ApiService {
         // ── Case 3 & 4: HTTP 503 / 500 / network timeout / connection refused ─
         // Server temporarily overloaded or DB down.
         // NEVER logout. Retry up to 3 times with 3-second delay.
-        final isServerError = statusCode == 503 || statusCode == 500;
+        final isServerError = statusCode == 503 || statusCode == 500 || statusCode >= 500;
         final isNetworkError = error.type == DioExceptionType.connectionTimeout ||
             error.type == DioExceptionType.receiveTimeout ||
             error.type == DioExceptionType.sendTimeout ||
@@ -687,7 +698,9 @@ class ApiService {
         } else if (responseData is String) {
           errorMessage = responseData;
         }
-      } else if (e.type == DioExceptionType.connectionTimeout) {
+      } else if (e.response!.statusCode! > 499) {
+        errorMessage = 'Server error.';
+      }  else if (e.type == DioExceptionType.connectionTimeout) {
         errorMessage = 'Connection timeout. Please check your internet.';
       } else if (e.type == DioExceptionType.receiveTimeout) {
         errorMessage = 'Server not responding. Please try again.';
@@ -711,10 +724,12 @@ class ApiService {
 
   Future<void> logout() async {
     debugPrint('API Call: POST $baseUrl/api/logout');
-    await _dio.post('/api/logout');
+    try {
+      await _dio.post('/api/logout');
+    } catch (_) {}
     debugPrint('API Response: POST $baseUrl/api/logout - Success');
     clearAuthToken();
-
+    _sessionDisplacedHandled = false;
   }
 
   // Groups APIs
@@ -730,20 +745,9 @@ class ApiService {
   // Users & Chat APIs
   Future<List<dynamic>> getChatList() async {
     debugPrint('API Call: GET $baseUrl/api/users/chat-list');
-    try {
-      final response = await _dio.get('/api/users/chat-list');
-      debugPrint(
-          'API Response: GET $baseUrl/api/users/chat-list - ${response.data}');
-      return response.data as List<dynamic>;
-    } on DioException catch (e) {
-      // Only logout when chat-list returns 401/403 — not for any other API
-      if (e.response?.statusCode == 401 || e.response?.statusCode == 403) {
-        await _handle401Error();
-        await _handle401Error();
-        logout();
-      }
-      rethrow;
-    }
+    final response = await _dio.get('/api/users/chat-list');
+    debugPrint('API Response: GET $baseUrl/api/users/chat-list - ${response.data}');
+    return response.data as List<dynamic>;
   }
 
   Future<List<User>> searchUsers(String query,{int page = 1}) async {

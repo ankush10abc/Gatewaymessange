@@ -4,6 +4,7 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/data/hive_chat_data_source.dart';
 import '../../core/models/user_model.dart';
@@ -51,9 +52,8 @@ class AuthNotifier extends StateNotifier<AuthState> {
     _apiService = ApiService(dio);
 
     // Case 2 / generic 401: ping succeeded + retry still 401 → confirmed logout
-    ApiService.onUnauthorized = () async {
-      bool hasinternet = await InternetChecker.hasInternet();
-      if (hasinternet) _handle401Unauthorized();
+    ApiService.onUnauthorized = () {
+      _handle401Unauthorized();
     };
 
     // Case 1: session_displaced — intentional server-side session kill.
@@ -181,11 +181,17 @@ class AuthNotifier extends StateNotifier<AuthState> {
 
   void _handle401Unauthorized() async {
     final userId = state.user?.id;
-    await _stopAllServices(); // Remove all notifications on 401
+    await _stopAllServices();
     await _storage.clearAll();
     _apiService.clearAuthToken();
     if (userId != null) await HiveChatDataSource().clearForUser(userId);
     state = AuthState();
+    // GoRouter redirect triggers automatically when isAuthenticated becomes false.
+    // Force a refresh via the global navigator as a safety net.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = navigatorKey.currentContext;
+      if (ctx != null) GoRouter.of(ctx).go('/login');
+    });
   }
 
   /// Case 1: session_displaced — user logged in on another device.
@@ -296,25 +302,17 @@ class AuthNotifier extends StateNotifier<AuthState> {
         await FirebaseService.setUserOffline(state.user!.id);
         await _apiService.setOfflineStatus();
       }
-
       await _apiService.logout();
-      await _stopAllServices(); // Remove all background notifications on logout
-      await _storage.clearAll();
+    } catch (_) {}
 
-      // Clear this user's Hive chat cache so the next user never sees stale data
-      if (loggedOutUserId != null) {
-        await HiveChatDataSource().clearForUser(loggedOutUserId);
-      }
-
-      state = AuthState();
-    } catch (e) {
-      await _stopAllServices(); // Ensure all notifications removed even on error
-      await _storage.clearAll();
-      if (loggedOutUserId != null) {
-        await HiveChatDataSource().clearForUser(loggedOutUserId);
-      }
-      state = AuthState();
+    await _stopAllServices();
+    await _storage.clearAll();
+    if (loggedOutUserId != null) {
+      await HiveChatDataSource().clearForUser(loggedOutUserId);
     }
+    state = AuthState();
+    // state = AuthState() sets isAuthenticated = false, which triggers
+    // GoRouter redirect → '/login' automatically via routerProvider listener.
   }
 
   // Get current user info
