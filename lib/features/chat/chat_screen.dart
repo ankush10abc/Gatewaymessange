@@ -1115,7 +1115,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
 
         if (mounted) {
           setState(() {
-            _messages = cachedMessages;
+            _messages = _dedupMessages(cachedMessages);
           });
         }
       }
@@ -1467,12 +1467,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       }
     }
 
-    // Final dedup: collapse any remaining entries that share the same msgId
-    // (can happen when API-loaded 'msgid_X' and Firebase 'firebaseId' both
-    // survived the loop for the same logical message).
-    final seenMsgIds = <String>{};
+    // Final dedup: collapse entries sharing the same msgId OR non-temp id.
+    // Group API messages have msgId='' but id='501' (keyed as 'api_501');
+    // Firebase messages have msgId='501' and firebaseId='-NxABC' (keyed as '-NxABC').
+    // Registering the non-prefixed id into seenIds collapses both.
+    final seenIds = <String>{};
     final deduped = <String, Message>{};
-    // Prefer firebaseId-keyed entries over msgid_-keyed ones
+    // Prefer firebaseId-keyed entries over msgid_/api_-keyed ones
     final sorted = messageMap.entries.toList()
       ..sort((a, b) {
         final aIsFirebase = !a.key.startsWith('msgid_') && !a.key.startsWith('api_') && !a.key.startsWith('temp_');
@@ -1483,11 +1484,17 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
       });
     for (final entry in sorted) {
       final item = entry.value;
-      final mid = item.msgId;
-      if (mid != null && mid.isNotEmpty && mid != '0') {
-        if (seenMsgIds.contains(mid)) continue; // duplicate — skip
-        seenMsgIds.add(mid);
-      }
+      final mid = item.msgId?.trim() ?? '';
+      final rawId = item.id.trim();
+      final fbId = item.firebaseId?.trim() ?? '';
+      // Check all identity fields against seen set
+      if (fbId.isNotEmpty && seenIds.contains(fbId)) continue;
+      if (mid.isNotEmpty && mid != '0' && seenIds.contains(mid)) continue;
+      if (!rawId.startsWith('temp_') && rawId.isNotEmpty && seenIds.contains(rawId)) continue;
+      // Register all identity fields
+      if (fbId.isNotEmpty) seenIds.add(fbId);
+      if (mid.isNotEmpty && mid != '0') seenIds.add(mid);
+      if (!rawId.startsWith('temp_') && rawId.isNotEmpty) seenIds.add(rawId);
       deduped[entry.key] = item;
     }
 
@@ -1500,31 +1507,29 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
   /// A message is a duplicate if it shares the same non-empty msgId OR firebaseId
   /// with another entry. Firebase-keyed entries are preferred over temp/api entries.
   List<Message> _dedupMessages(List<Message> list) {
-    final seenFirebaseIds = <String>{};
-    final seenMsgIds = <String>{};
-    // Sort so firebase-keyed entries come first (they win over temp/api entries)
+    // Single set tracks firebaseId + msgId + non-temp id together.
+    // Group API messages have msgId='' but id='501'; Firebase messages have
+    // firebaseId='-NxABC' and msgId='501'. Registering id='501' into seenIds
+    // means the Firebase message's msgId='501' matches and is collapsed.
+    final seenIds = <String>{};
+    // Sort: firebase-keyed first, then non-temp, then temp
     final sorted = list.toList()
       ..sort((a, b) {
-        final aIsTemp = a.id.startsWith('temp_');
-        final bIsTemp = b.id.startsWith('temp_');
-        if (!aIsTemp && bIsTemp) return -1;
-        if (aIsTemp && !bIsTemp) return 1;
-        return 0;
+        final aScore = a.firebaseId?.isNotEmpty == true ? 0 : a.id.startsWith('temp_') ? 2 : 1;
+        final bScore = b.firebaseId?.isNotEmpty == true ? 0 : b.id.startsWith('temp_') ? 2 : 1;
+        return aScore.compareTo(bScore);
       });
     final result = <Message>[];
     for (final msg in sorted) {
-      final fbId = msg.firebaseId?.trim();
-      final mId = msg.msgId?.trim();
-      // Check firebaseId collision
-      if (fbId != null && fbId.isNotEmpty) {
-        if (seenFirebaseIds.contains(fbId)) continue;
-        seenFirebaseIds.add(fbId);
-      }
-      // Check msgId collision
-      if (mId != null && mId.isNotEmpty && mId != '0') {
-        if (seenMsgIds.contains(mId)) continue;
-        seenMsgIds.add(mId);
-      }
+      final fbId = msg.firebaseId?.trim() ?? '';
+      final mId = msg.msgId?.trim() ?? '';
+      final rawId = msg.id.trim();
+      if (fbId.isNotEmpty && seenIds.contains(fbId)) continue;
+      if (mId.isNotEmpty && mId != '0' && seenIds.contains(mId)) continue;
+      if (!rawId.startsWith('temp_') && rawId.isNotEmpty && seenIds.contains(rawId)) continue;
+      if (fbId.isNotEmpty) seenIds.add(fbId);
+      if (mId.isNotEmpty && mId != '0') seenIds.add(mId);
+      if (!rawId.startsWith('temp_') && rawId.isNotEmpty) seenIds.add(rawId);
       result.add(msg);
     }
     return result;
@@ -1593,6 +1598,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
             _hasMoreMessages = false;
           }
           _messages.addAll(olderMessages);
+          _messages = _dedupMessages(_messages)
+            ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
           _isLoadingOldMessages = false;
         });
       }
@@ -3250,7 +3257,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                     children: [
                       // Show 3-sec loader for attendance group on first open
                       if (_isAttendanceGroup == true && isFirstTime)
-                        const Center(child: CircularProgressIndicator())
+                        const Center(child: Text("Please wait while chat is loading",style: TextStyle(color: Colors.black),))
                       else
                         ListView.builder(
                           scrollCacheExtent:
@@ -3341,6 +3348,20 @@ class _ChatScreenState extends ConsumerState<ChatScreen>
                           if (userRole.toString().toLowerCase() != 'teacher') {
                             return;
                           }
+                          final hasInternet =
+                          await InternetChecker.hasInternet();
+                          // debugPrint("hasInternet Role $hasInternet");
+                          if(!hasInternet){
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                    'No internet connection. Please check your connection.'),
+                                duration: Duration(seconds: 2),
+                              ),
+                            );
+                            return;
+                          }
+
                           final result = await Navigator.push(
                             context,
                             MaterialPageRoute(

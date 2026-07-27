@@ -348,7 +348,7 @@ class ApiService {
         debugPrint('Status Code: ${error.response?.statusCode}');
         debugPrint('Headers: ${error.requestOptions.headers}');
 
-        if(error.response?.statusCode == 401 && error.requestOptions.uri.toString().contains('chat-list')){
+        if((error.response?.statusCode == 401 && error.requestOptions.uri.toString().contains('chat-list')) || (error.response?.statusCode == 401 && error.requestOptions.uri.toString().contains('api/messages/group')) || (error.response?.statusCode == 401 && error.requestOptions.uri.toString().contains('api/messages/conversation'))){
           if (onUnauthorized != null) {
             // Fallback: use existing unauthorized handler
             onUnauthorized!();
@@ -917,6 +917,7 @@ class ApiService {
         },
       )
     );
+
     debugPrint(
         'API Response: GET $baseUrl/api/messages/group/$groupId?page=$page&limit=$limit - ${response.data}');
 
